@@ -68,7 +68,6 @@ all-proteins.csv
 protein_db_CDS_counts.csv  
 gbk-annotation-table.csv  
 chromosome-plasmid-table.csv  
-protein_db.faa  
 prokaryotes-with-plasmids.txt  
 
 Then, run the follow scripts to annotate the genomes, and to cross-check
