@@ -25,21 +25,18 @@ download prokaryotes.txt into ../data/GENOME_REPORTS:
 
 wget https://ftp.ncbi.nlm.nih.gov/genomes/GENOME_REPORTS/prokaryotes.txt
 
-For replicating the results in the manuscript, skip this step, and just use the versions
-prokaryotes.txt provided in the data/ folder.
+For replicating the results in the paper, skip this step, and just use the
+prokaryotes.txt provided in the data/ folder. This one is dated March 21 2021
+and was used for the paper.
 
-### See the directions in src/README.md for how to run the scripts of the
-bioinformatics pipeline.
+### See the directions in src/README.md for how to run the bioinformatics pipeline and analysis.
 
-### You will have to download the mobileOG-db database into a folder called
-"../data/mobileOG-db_beatrix-1-6_v1_all" relative to the directory containing this source code.
+### You will have to download the mobileOG-db database into a folder called "../data/mobileOG-db_beatrix-1-6_v1_all" relative to the directory containing this source code.
 
-This database can be downloaded from the following link:
+This database can be downloaded from the following link:  
 https://mobileogdb.flsi.cloud.vt.edu/entries/database_download  
 
-
-### If everything checks out, you are now ready to run ARG-duplication-analysis.R to
-generate figures!
+### If everything checks out, you are now ready to run ARG-duplication-analysis.R to generate figures!
 
 ## Mathematical modeling results.
 
