@@ -1,9 +1,0 @@
-Well,Transposon,Plasmid,Day,TetConc,Replicate,Sample Name,probe,cycle_at_threshold
-A1,B30,no_plasmid,0,0,1,K12_B30,Cm,25.558
-A1,B30,no_plasmid,0,0,1,K12_B30,Tet,26.577
-B1,B30,no_plasmid,0,0,2,K12_B30,Cm,25.720
-B1,B30,no_plasmid,0,0,2,K12_B30,Tet,26.790
-C1,B59,no_plasmid,0,0,1,K12_B59,Cm,25.565
-C1,B59,no_plasmid,0,0,1,K12_B59,Tet,26.489
-D1,B59,no_plasmid,0,0,2,K12_B59,Cm,25.470
-D1,B50,no_plasmid,0,0,2,K12_B59,Tet,26.364

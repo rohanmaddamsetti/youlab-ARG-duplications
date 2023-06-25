@@ -1,13 +1,30 @@
 ## ARG-duplication-analysis.R by Rohan Maddamsetti.
 ## analyse the distribution of antibiotic resistance genes (ARGs)
 ## on chromosomes versus plasmids in  fully-sequenced genomes and plasmids
-## in the NCBI Nucleotide database.
+## in the NCBI RefSeq database (dated March 26 2021).
+
+## IMPORTANT NOTE: Julia needs to be accessible from the shell as called by the R function system()
+## near the end of this script. This is for a relatively minor result; the big stuff doesn't depend on Julia
+## being accessible from R.
 
 library(tidyverse)
 library(cowplot)
 library(ggrepel)
 library(data.table)
 
+
+################################################################################
+## Global variables that affect assumptions going into the analysis.
+
+## For control analysis to check robustness of results to method used to score ARGs
+## and MGE-associated genes.
+## By default set to FALSE.
+USE.CARD.AND.MOBILE.OG.DB <- FALSE
+
+## by default, don't count plasmid proteins as duplicates.
+## The results are robust to this assumption; nothing changes.
+COUNT.PLASMID.PROTEINS.AS.DUPLICATES <- FALSE
+################################################################################
 
 fancy_scientific <- function(x) {
     ## function for plotting better axis labels.
@@ -19,6 +36,14 @@ fancy_scientific <- function(x) {
 ################################################################################
 ## Regular expressions used in this analysis.
 
+## We build on the regular expressions used by Zeevi et al. (2019).
+## Transposon: ‘transpos\S*|insertion|Tra[A-Z]|Tra[0-9]|IS[0-9]|conjugate transposon’
+## plasmid: ‘relax\S*|conjug\S*|mob\S*|plasmid|type IV|chromosome partitioning|chromosome segregation’
+## phage: ‘capsid|phage|tail|head|tape measure|antiterminatio’
+## other HGT mechanisms: ‘integrase|excision\S*|exo- nuclease|recomb|toxin|restrict\S*|resolv\S*|topoisomerase|reverse transcrip’
+## antibiotic resistance: ‘azole resistance|antibiotic resistance|TetR|tetracycline resistance|VanZ|betalactam\S*|beta-lactam|antimicrob\S*|lantibio\S*’.
+
+
 ## unknown protein keywords.
 unknown.protein.keywords <- "unknown|Unknown|hypothetical|Hypothetical|Uncharacterized|Uncharacterised|uncharacterized|uncharacterised|DUF|unknow|putative protein in bacteria|Unassigned|unassigned"
 
@@ -26,9 +51,14 @@ unknown.protein.keywords <- "unknown|Unknown|hypothetical|Hypothetical|Uncharact
 ## so filter out those cases, when counting unknown proteins.
 
 ## match MGE genes using the following keywords in the "product" annotation
-IS.keywords <- "IS|transposon|Transposase|transposase|Transposable|transposable|virus|Phage|phage|integrase|Integrase|baseplate|tail|intron|Mobile|mobile|antitoxin|toxin|capsid|plasmid|Plasmid|conjug|Tra"
+transposon.keywords <- "IS|transpos\\S*|insertion|Tra[A-Z]|Tra[0-9]|tra[A-Z]|conjugate transposon|Transpos\\S*|Tn[0-9]|tranposase|Tnp|Ins|ins"
+plasmid.keywords <- "relax\\S*|conjug\\S*|mob\\S*|plasmid|type IV|chromosome partitioning|chromosome segregation|Mob\\S*|Plasmid|Rep|Conjug\\S*"
+phage.keywords <- "capsid|phage|Tail|tail|head|tape measure|antiterminatio|Phage|virus|Baseplate|baseplate|coat|entry exclusion"
+other.HGT.keywords <- "Integrase|integrase|excision\\S*|exonuclease|recomb|toxin|restrict\\S*|resolv\\S*|topoisomerase|reverse transcrip|intron|antitoxin|toxin|Toxin|Reverse transcriptase|hok|Hok|competence|addiction"
 
-MGE.or.unknown.protein.keywords <- paste(IS.keywords,unknown.protein.keywords,sep="|")
+
+MGE.keywords <- paste(transposon.keywords, plasmid.keywords, phage.keywords, other.HGT.keywords, sep="|")
+MGE.or.unknown.protein.keywords <- paste(MGE.keywords,unknown.protein.keywords,sep="|")
 
 ## Elongation Factor Tu (2 copies in most bacteria).
 ## \\b is a word boundary.
@@ -37,50 +67,109 @@ EFTu.keywords <- "\\bTu | Tu\\b|-Tu\\b"
 
 ## antibiotic-specific keywords.
 chloramphenicol.keywords <- "chloramphenicol|Chloramphenicol"
-tetracycline.keywords <- "tetracycline|Tetracycline"
+tetracycline.keywords <- "tetracycline efflux|Tetracycline efflux|TetA|Tet(A)|tetA|tetracycline-inactivating"
 MLS.keywords <- "macrolide|lincosamide|streptogramin"
-multidrug.keywords <- "multidrug"
-beta.lactam.keywords <- "lactamase"
-glycopeptide.keywords <- "glycopeptide resistance|VanZ"
-polypeptide.keywords <- "bacitracin|polymyxin B"
-diaminopyrimidine.keywords <- "trimethoprim-resistant"
-sulfonamide.keywords <- "sulfonamide-resistant"
-quinolone.keywords <- "quinolone|Quinolone|oxacin"
-aminoglycoside.keywords <- "aminoglycoside|streptomycin|Streptomycin|kanamycin|Kanamycin|tobramycin|Tobramycin|gentamicin|Gentamicin|neomycin|Neomycin"
-macrolide.keywords <- "macrolide|ketolide|Azithromycin|azithromycin|Clarithromycin|clarithromycin|Erythromycin|erythomycin"
+multidrug.keywords <- "Multidrug resistance|multidrug resistance|antibiotic resistance"
+beta.lactam.keywords <- "lactamase|LACTAMASE|beta-lactam|oxacillinase|carbenicillinase|betalactam\\S*"
+glycopeptide.keywords <- "glycopeptide resistance|VanZ|vancomycin resistance|VanA|VanY|VanX|VanH|streptothricin N-acetyltransferase"
+polypeptide.keywords <- "bacitracin|polymyxin B|phosphoethanolamine transferase|phosphoethanolamine--lipid A transferase"
+diaminopyrimidine.keywords <- "trimethoprim|dihydrofolate reductase|dihydropteroate synthase"
+sulfonamide.keywords <- "sulfonamide|Sul1|sul1|sulphonamide"
+quinolone.keywords <- "quinolone|Quinolone|oxacin|qnr|Qnr"
+aminoglycoside.keywords <- "Aminoglycoside|aminoglycoside|streptomycin|Streptomycin|kanamycin|Kanamycin|tobramycin|Tobramycin|gentamicin|Gentamicin|neomycin|Neomycin|16S rRNA (guanine(1405)-N(7))-methyltransferase|23S rRNA (adenine(2058)-N(6))-methyltransferase|spectinomycin 9-O-adenylyltransferase|Spectinomycin 9-O-adenylyltransferase|Rmt"
+macrolide.keywords <- "macrolide|ketolide|Azithromycin|azithromycin|Clarithromycin|clarithromycin|Erythromycin|erythromycin|Erm|EmtA"
+antimicrobial.keywords <- "QacE|Quaternary ammonium|quaternary ammonium|Quarternary ammonium|quartenary ammonium|fosfomycin|ribosomal protection|rifampin ADP-ribosyl|azole resistance|antimicrob\\S*"
 
-antibiotic.keywords <- "chloramphenicol|Chloramphenicol|tetracycline|Tetracycline|macrolide|lincosamide|streptogramin|multidrug|lactamase|glycopeptide resistance|VanZ|bacitracin|polymyxin B|trimethoprim-resistant|sulfonamide-resistant|quinolone|Quinolone|oxacin|aminoglycoside|streptomycin|Streptomycin|kanamycin|Kanamycin|tobramycin|Tobramycin|gentamicin|Gentamicin|neomycin|Neomycin|macrolide|ketolide|Azithromycin|azithromycin|Clarithromycin|clarithromycin|Erythromycin|erythomycin|antibiotic resistance"
 
-antibiotic.or.IS.keywords <- paste(IS.keywords,antibiotic.keywords,sep="|")
+antibiotic.keywords <- paste(chloramphenicol.keywords, tetracycline.keywords, MLS.keywords, multidrug.keywords,
+    beta.lactam.keywords, glycopeptide.keywords, polypeptide.keywords, diaminopyrimidine.keywords,
+    sulfonamide.keywords, quinolone.keywords, aminoglycoside.keywords, macrolide.keywords, antimicrobial.keywords, sep="|")
 
-## The regular expressions used by Zeevi et al. (2019).
-## These are not used in this analysis, but nice to have on hand.
-## Transposon: ‘transpos\S*|insertion|Tra[A-Z]|Tra[0-9]|IS[0-9]|conjugate transposon’
-## plasmid: ‘relax\S*|conjug\S*|mob\S*|plasmid|type IV|chromosome partitioning|chromosome segregation’
-## phage: ‘capsid|phage|tail|head|tape measure|antiterminatio’
-## other HGT mechanisms: ‘integrase|excision\S*|exo- nuclease|recomb|toxin|restrict\S*|resolv\S*|topoisomerase|reverse transcrip’
-## antibiotic resistance: ‘azole resistance|antibiotic resistance|TetR|tetracycline resistance|VanZ|betalactam\S*|beta-lactam|antimicrob\S*|lantibio\S*’.
+antibiotic.or.MGE.keywords <- paste(MGE.keywords,antibiotic.keywords,sep="|")
+
+
+categorize.as.MGE.ARG.or.other <- function(product) {
+    if (is.na(product))
+        return("Other function")
+    else if (str_detect(product, antibiotic.keywords))
+        return("ARG")
+    else if (str_detect(product, MGE.keywords))
+        return("MGE")
+    else
+        return("Other function")
+}
 
 
 ################################################################################
 ## Set up the key data structures for the analysis:
 ## gbk.annotation, in particular.
 
-## import the 35GB file containing all proteins, including singletons.
+## import the 37GB file containing all proteins, including singletons.
 ## I can save a ton of memory if I don't import the sequence column,
 ## and by using the data.table package for import.
 all.proteins <- data.table::fread("../results/all-proteins.csv",
                                   drop="sequence")
 
+## get the genomes that passed assembly QC.
+## We will use this to filter episome.database and gbk.annotation.
+QCed.genomes <- read.csv("../results/genome-assembly-metadata.csv") %>%
+    as_tibble()
+
 ## annotate source sequences as plasmid or chromosome.
 episome.database <- read.csv("../results/chromosome-plasmid-table.csv") %>%
-    as_tibble()
+    as_tibble() %>%
+    ## filter based on QCed.genomes.
+    filter(Annotation_Accession %in% QCed.genomes$Annotation_Accession)
+
+## Double-check that every plasmid is associated with a chromosome.
+check.plasmid.accessions <- function(episome.database) {
+    plasmid.accessions <- sort(filter(episome.database, SequenceType=='plasmid')$Annotation_Accession)
+    chromosome.accessions <- sort(filter(episome.database, SequenceType=='chromosome')$Annotation_Accession)
+    bad.plasmid.vec <- sapply(plasmid.accessions,function(x) ifelse(x %in% chromosome.accessions,0,1))
+    if (sum(bad.plasmid.vec) > 0)
+        return(1) ## at least one plasmid is not associated with a chromosome
+    else
+        return(0) ## all plasmids are associated with chromosomes.
+}
+## run the test.
+check.plasmid.accessions(episome.database)
+
+## I used the script cross-check-Hawkey2022-accessions.py
+## to find 8 genomes in the Hawkey et al. 2022 dataset that are present in the main dataset
+## in gbk.annotation. Let's omit these from the main analysis to preserve independence of the
+## clinical validation data.
+
+Hawkey.overlaps.in.gbk.annotation.vec <- c(
+    "GCF_016126855.1_ASM1612685v1",
+    "GCF_015476295.1_ASM1547629v1",
+    "GCF_015325925.1_ASM1532592v1",
+    "GCF_015999425.1_ASM1599942v1",
+    "GCF_015999405.1_ASM1599940v1",
+    "GCF_017584065.1_ASM1758406v1",
+    "GCF_904864465.1_INF298",
+    "GCF_904864595.1_INF333")
 
 gbk.annotation <- read.csv(
     "../results/computationally-annotated-gbk-annotation-table.csv") %>%
     as_tibble() %>%
+    ## filter based on QCed.genomes.
+    filter(Annotation_Accession %in% QCed.genomes$Annotation_Accession) %>%
+    ## remove the overlaps with the Hawkey et al. (2022) clinical validation data.
+    filter(!(Annotation_Accession %in% Hawkey.overlaps.in.gbk.annotation.vec)) %>%
     ## refer to NA annotations as "Unannotated".
     mutate(Annotation = replace_na(Annotation,"Unannotated")) %>%
+    ## collapse Annotations into a smaller number of categories as follows:
+    ## Marine, Freshwater --> Water
+    ## Sediment, Soil, Terrestrial --> Earth
+    ## Plants, Agriculture, Animals --> Plants & Animals
+    mutate(Annotation = replace(Annotation, Annotation == "Marine", "Water")) %>%
+    mutate(Annotation = replace(Annotation, Annotation == "Freshwater", "Water")) %>%
+    mutate(Annotation = replace(Annotation, Annotation == "Sediment", "Earth")) %>%
+    mutate(Annotation = replace(Annotation, Annotation == "Soil", "Earth")) %>%
+    mutate(Annotation = replace(Annotation, Annotation == "Terrestrial", "Earth")) %>%
+    mutate(Annotation = replace(Annotation, Annotation == "Plants", "Plants & Animals")) %>%
+    mutate(Annotation = replace(Annotation, Annotation == "Agriculture", "Plants & Animals")) %>%
+    mutate(Annotation = replace(Annotation, Annotation == "Animals", "Plants & Animals")) %>%
     ## get species name annotation from episome.database.
     left_join(episome.database) %>%
     ## Annotate the genera.
@@ -91,26 +180,18 @@ gbk.annotation <- read.csv(
     ## when we add this annotation to duplicate.proteins and singleton.proteins.
     select(-NCBI_Nucleotide_Accession, -SequenceType) %>%
     ## and we have to explicitly remove redundant rows now.
-    distinct()
-
-## Some strains in chromosome-and-plasmid-table.csv and
-## gbk-annotation-table.csv are missing from
-## all-proteins.csv
-## These should be the genomes that do not have
-## CDS annotated in their GFF annotation.
-## list the 2,848 strains missing from the singletons data.
-missing.ones <- gbk.annotation %>%
-    filter(!(Annotation_Accession %in% all.proteins$Annotation_Accession))
-write.csv(missing.ones, file= "../results/strains-without-proteins.csv")
-
-## CRITICAL STEP: remove all genomes that do not have proteins annotated.
-gbk.annotation <- anti_join(gbk.annotation, missing.ones) %>%
+    distinct() %>%
     ## And now remove all Unannotated genomes, since these are not analyzed
     ## at all in this first paper.
     filter(Annotation != "Unannotated") %>%
     ## and remove any strains (although none should fall in this category)
     ## that were not annotated by annotate-ecological-category.py.
     filter(Annotation != "blank")
+
+
+## print gbk.annotation to file for cross-checking.
+write.csv(gbk.annotation, file="../results/gbk-annotation-of-analyzed-complete-genomes.csv",
+          row.names=FALSE,quote=F)
 
 ## return the first column for several tables.
 ## shows the number of isolates in each category.
@@ -130,6 +211,19 @@ order.by.total.isolates <- make.isolate.totals.col(gbk.annotation)$Annotation
 episome.database <- episome.database %>%
     filter(Annotation_Accession %in% gbk.annotation$Annotation_Accession)
 
+## score ARGs and MGE-associated genes
+## using the CARD and mobileOG-db databases (>80% ID over >85% length of best hit).
+all.proteins.in.CARD <- read.csv("../results/all-proteins-in-CARD.csv") %>%
+    as_tibble() %>%
+    ## now merge with gbk annotation.
+    inner_join(gbk.annotation)
+
+all.proteins.in.mobileOGdb <- read.csv("../results/all-proteins-in-mobileOG-db.csv") %>%
+    as_tibble() %>%
+    ## now merge with gbk annotation.
+    inner_join(gbk.annotation)
+
+
 ## read in duplicate proteins with sequences, using a separate file.
 ## I want the sequence column for the duplicate genes,
 ## but not for the singletons, to save memory.
@@ -140,8 +234,6 @@ duplicate.proteins <- read.csv("../results/duplicate-proteins.csv") %>%
 ######## Lingchong asked for this control analysis.
 ## by default, don't count plasmid proteins as duplicates.
 ## The results are robust to this assumption; nothing changes.
-COUNT.PLASMID.PROTEINS.AS.DUPLICATES <- FALSE
-
 if (COUNT.PLASMID.PROTEINS.AS.DUPLICATES) {
 
     ## CRITICAL STEP: get plasmid proteins to count as duplicates.
@@ -161,11 +253,12 @@ if (COUNT.PLASMID.PROTEINS.AS.DUPLICATES) {
         filter(plasmid_count == 0) %>%
         inner_join(gbk.annotation)
 
-    } else { ## just get the singleton protein by filtering.
-        singleton.proteins <- all.proteins %>%
-            filter(count == 1) %>%
-            inner_join(gbk.annotation)     
+} else { ## just get the singleton protein by filtering.
+    singleton.proteins <- all.proteins %>%
+        filter(count == 1) %>%
+        inner_join(gbk.annotation)
 }
+
 ## free up memory by deallocating all.proteins,
 rm(all.proteins)
 ## and running garbage collection.
@@ -192,9 +285,141 @@ plasmid.annotation <- protein.db.metadata %>%
     arrange(desc(number))
 
 ##########################################################################
-## Figure 1 is a schematic of the analysis pipeline.
+## Use CARD and MobileOG-db to check the precision and recall of keywords on
+## duplicated ARGs and duplicated MGE-associated genes.
+
+duplicate.proteins.in.CARD <- all.proteins.in.CARD %>%
+    filter(count > 1)
+duplicate.proteins.in.mobileOGdb <- all.proteins.in.mobileOGdb %>%
+    filter(count > 1)
+
+## Measure precision and recall of keywords, treating CARD hits as ground truth.
+duplicate.ARGs.by.keyword <- duplicate.proteins %>%
+    filter(str_detect(.$product,antibiotic.keywords))
+
+## True positives (CARD)
+duplicate.proteins.in.CARD.matched.by.keywords <- duplicate.proteins.in.CARD %>%
+    filter(str_detect(.$product,antibiotic.keywords))
+
+## False negatives (CARD)
+duplicate.proteins.in.CARD.not.matched.by.keywords <- duplicate.proteins.in.CARD %>%
+    filter(!str_detect(.$product,antibiotic.keywords))
+
+## false positives (CARD)
+duplicate.ARGs.not.in.CARD <- duplicate.ARGs.by.keyword %>%
+    filter(!(SeqID %in% duplicate.proteins.in.CARD$SeqID)) %>%
+    arrange(product) %>% select(-sequence) %>% as_tibble()
+
+
+## duplicated ARG precision = 0.931
+length(duplicate.proteins.in.CARD.matched.by.keywords$SeqID)/(length(duplicate.ARGs.not.in.CARD$SeqID) + length(duplicate.proteins.in.CARD.matched.by.keywords$SeqID))
+
+## duplicated ARG recall = 0.972
+length(duplicate.proteins.in.CARD.matched.by.keywords$SeqID)/(length(duplicate.proteins.in.CARD.not.matched.by.keywords$SeqID) + length(duplicate.proteins.in.CARD.matched.by.keywords$SeqID))
+
+##############
+## Measure precision and recall of keywords, treating mobileOG-db hits as ground truth.
+duplicate.MGE.genes.by.keyword <- duplicate.proteins %>%
+    filter(str_detect(.$product,MGE.keywords))
+
+## True positives (mobileOG-db)
+duplicate.proteins.in.mobileOGdb.matched.by.keywords <- duplicate.proteins.in.mobileOGdb %>%
+    filter(str_detect(.$product,MGE.keywords))
+
+## False negatives (mobileOG-db)
+duplicate.proteins.in.mobileOGdb.not.matched.by.keywords <- duplicate.proteins.in.mobileOGdb %>%
+    filter(!str_detect(.$product,MGE.keywords))
+
+## False positives (mobileOG-db)
+duplicate.MGE.genes.not.in.mobileOGdb <- duplicate.MGE.genes.by.keyword %>%
+    filter(!(SeqID %in% duplicate.proteins.in.mobileOGdb$SeqID)) %>%
+    as_tibble()
+
+## duplicated MGE genes precision = 0.786
+length(duplicate.proteins.in.mobileOGdb.matched.by.keywords$SeqID)/(length(duplicate.MGE.genes.not.in.mobileOGdb$SeqID) + length(duplicate.proteins.in.mobileOGdb.matched.by.keywords$SeqID))
+
+## duplicated MGE genes recall = 0.872
+length(duplicate.proteins.in.mobileOGdb.matched.by.keywords$SeqID)/(length(duplicate.proteins.in.mobileOGdb.not.matched.by.keywords$SeqID) + length(duplicate.proteins.in.mobileOGdb.matched.by.keywords$SeqID))
+
 ##########################################################################
-## Code and data structures for Figure 2ABC.
+## IMPORTANT: global data structures used THROUGHOUT the entire data analysis.
+
+if (USE.CARD.AND.MOBILE.OG.DB) {
+    duplicate.proteins <- duplicate.proteins %>%
+        ## add columns to duplicate proteins,
+        ## based on whether they are in CARD or mobileOG-db or not.
+        mutate(in.CARD = ifelse(SeqID %in%all.proteins.in.CARD$SeqID, 1, 0)) %>%
+        mutate(in.mobileOGdb = ifelse(SeqID %in%all.proteins.in.mobileOGdb$SeqID, 1, 0)) %>%
+        mutate(Category = ifelse(in.CARD, "ARG", ifelse(in.mobileOGdb, "MGE", "Other function")))
+
+    singleton.proteins <- singleton.proteins %>%
+        ## add columns to singleton proteins,
+        ## based on whether they are in CARD or mobileOG-db or not.
+        mutate(in.CARD = ifelse(SeqID %in%all.proteins.in.CARD$SeqID, 1, 0)) %>%
+        mutate(in.mobileOGdb = ifelse(SeqID %in%all.proteins.in.mobileOGdb$SeqID, 1, 0)) %>%
+        mutate(Category = ifelse(in.CARD, "ARG", ifelse(in.mobileOGdb, "MGE", "Other function")))
+    
+    duplicate.ARGs <- duplicate.proteins.in.CARD
+    duplicate.MGE.genes <- duplicate.proteins.in.mobileOGdb 
+
+    singleton.ARGs <- all.proteins.in.CARD %>%
+        filter(count == 1)
+        
+    singleton.MGE.genes <- all.proteins.in.mobileOGdb %>%
+        filter(count == 1)
+} else {
+
+    duplicate.proteins <- duplicate.proteins %>%
+        mutate(Category = sapply(product, categorize.as.MGE.ARG.or.other))
+    
+    singleton.proteins <- singleton.proteins %>%
+        mutate(Category = sapply(product, categorize.as.MGE.ARG.or.other))
+    
+    duplicate.ARGs <- duplicate.ARGs.by.keyword
+    duplicate.MGE.genes <- duplicate.MGE.genes.by.keyword
+
+    singleton.ARGs <- singleton.proteins %>%
+        filter(str_detect(.$product, antibiotic.keywords))
+
+    singleton.MGE.genes <- singleton.proteins %>%
+        filter(str_detect(.$product, MGE.keywords))
+}
+
+
+##########################################################################
+## Supplementary Data Files 3 and 4.
+
+## Supplementary Data File 4:  Duplicated ARGs and their annotation.
+## Need to run this code first, since S3DataFile construction depends on S4DataFile.
+S4DataFile <- duplicate.ARGs %>%
+    as_tibble() %>%
+    arrange(Annotation_Accession)
+write.csv(x=S4DataFile, file="../results/FileS4-Duplicated-ARGs.csv",quote=F,row.names=F)
+
+## Supplementary Data File 3: All genomes, and whether or not they contain duplicated ARGs.
+S3DataFile <- gbk.annotation %>%
+    mutate(hasDuplicatedARGs = sapply(
+               Annotation_Accession,
+               function(x)
+                   ifelse(x %in% S4DataFile$Annotation_Accession,TRUE,FALSE)))
+write.csv(x=S3DataFile,
+          file="../results/FileS3-Complete-Genomes-with-Duplicated-ARG-annotation.csv",
+          quote=F, row.names=F)
+
+##########################################################################
+## Figure 1ABCD. A deterministic ODE model demonstrates that selection can
+## drive the evolution of duplicated ARGs on plasmids.
+
+## The panels of this figure are generated in my Pluto notebook:
+## duplication-linear-ODE-model.jl.
+##########################################################################
+## Figure 1E is an analysis of the 9-day Tet50 evolution experiment.
+##########################################################################
+## Figure 2 is an analysis of the one-day Tet5 evolution experiment.
+##########################################################################
+## Figure 3 is a schematic of the analysis pipeline.
+##########################################################################
+## Code and data structures for Figure 4ABC.
 
 ## See Wikipedia reference:
 ## https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval
@@ -223,11 +448,10 @@ calc.isolate.confints <- function(df) {
 }
 
 
-make.TableS1 <- function(gbk.annotation, duplicate.proteins) {
+make.TableS1 <- function(gbk.annotation, duplicate.ARGs) {
 
     ## count the number of isolates with duplicated ARGs in each category.
-    ARG.category.counts <- duplicate.proteins %>%
-        filter(str_detect(.$product,antibiotic.keywords)) %>%
+    ARG.category.counts <- duplicate.ARGs %>%
         ## next two lines is to count isolates rather than genes
         select(Annotation_Accession, Annotation) %>%
         distinct() %>%
@@ -299,7 +523,7 @@ make.confint.figure.panel <- function(Table, order.by.total.isolates, title,
         ggplot(aes(y = Annotation, x = p)) +
         geom_point(size=1) +
         ylab("") +
-        xlab("% of Isolates") +
+        xlab("Proportion of Isolates") +
         theme_classic() +
         ggtitle(title) +
         ## plot CIs.
@@ -312,12 +536,19 @@ make.confint.figure.panel <- function(Table, order.by.total.isolates, title,
     return(Fig.panel)
 }
 
-## Data structure for Figure 2A:
+## Data structure for Figure 4A:
 ## normal-approximation confidence intervals for the percentage
 ## of isolates with duplicated ARGs.
-TableS1 <- make.TableS1(gbk.annotation, duplicate.proteins)
+TableS1 <- make.TableS1(gbk.annotation, duplicate.ARGs)
 ## write Supplementary Table S1 to file.
 write.csv(x=TableS1, file="../results/TableS1.csv")
+
+## Yi asked me to make these comparisons.
+TableS1.chromosome.dups <- make.TableS1(gbk.annotation,
+                                             filter(duplicate.ARGs, chromosome_count > 1))
+
+TableS1.plasmid.dups <- make.TableS1(gbk.annotation,
+                                             filter(duplicate.ARGs, plasmid_count > 1))
 
 ######################
 ## Table S2. Control: does the distribution of ARG singletons
@@ -328,11 +559,10 @@ write.csv(x=TableS1, file="../results/TableS1.csv")
 ## as most isolates have a gene that matches an antibiotic keyword.
 ## Animal-host isolates are depleted (perhaps due to aphid bacteria isolates?)
 
-make.TableS2 <- function(gbk.annotation, singleton.proteins) {
+make.TableS2 <- function(gbk.annotation, singleton.ARGs) {
 
 ## count the number of isolates with singleton AR genes in each category.
-    ARG.category.counts <- singleton.proteins %>%
-        filter(str_detect(.$product,antibiotic.keywords)) %>%
+    ARG.category.counts <- singleton.ARGs %>%
         ## next two lines is to count isolates rather than genes
         select(Annotation_Accession, Annotation) %>%
         distinct() %>%
@@ -341,7 +571,6 @@ make.TableS2 <- function(gbk.annotation, singleton.proteins) {
         arrange(desc(isolates_with_singleton_ARGs))
     gc() ## free memory.
     
-   
     ## join columns to make Table S2.
     TableS2 <- make.isolate.totals.col(gbk.annotation) %>%
         left_join(ARG.category.counts) %>%
@@ -352,12 +581,33 @@ make.TableS2 <- function(gbk.annotation, singleton.proteins) {
     return(TableS2)
 }
 
-## This data frame will be used for Figure 2B.
-TableS2 <- make.TableS2(gbk.annotation, singleton.proteins)
+## This data frame will be used for Figure 4B.
+TableS2 <- make.TableS2(gbk.annotation, singleton.ARGs)
 ## write TableS2 to file.
 write.csv(x=TableS2, file="../results/TableS2.csv")
+#########################################################################
+## make Supplementary Figure S2.
+TableS2.chromosome.only <- make.TableS2(gbk.annotation,
+                                             filter(singleton.ARGs, plasmid_count == 0))
 
+TableS2.plasmid.only <- make.TableS2(gbk.annotation,
+                                             filter(singleton.ARGs, chromosome_count == 0))
 gc() ## free memory after dealing with singleton data.
+
+S4FigA <- make.confint.figure.panel(TableS1.chromosome.dups, order.by.total.isolates, "D-ARGs (only chromosome)")
+S4FigB <- make.confint.figure.panel(TableS1.plasmid.dups, order.by.total.isolates, "D-ARGs (only plasmid)",
+                                        no.category.label = TRUE)
+S4FigC <- make.confint.figure.panel(TableS2.chromosome.only, order.by.total.isolates, "S-ARGs (only chromosome)")
+S4FigD <- make.confint.figure.panel(TableS2.plasmid.only, order.by.total.isolates, "S-ARGs (only plasmid)",
+                                    no.category.label = TRUE)
+
+S4Fig <- plot_grid(S4FigA, S4FigB, S4FigC, S4FigD, labels = c("A", "B","C",'D'), nrow = 2, rel_widths = c(1.3, 1, 1.3, 1))
+
+if (USE.CARD.AND.MOBILE.OG.DB) { ## then this is Supplementary Figure S16.
+    ggsave("../results/S16Fig.pdf", S4Fig, width=6.5, height=3.75)
+} else { ## This is supplementary Figure S4.
+    ggsave("../results/S4Fig.pdf", S4Fig, width=6.5, height=3.75)
+}
 
 #########################################################################
 ## Table S3. Control: does the number of isolates with duplicate genes
@@ -389,17 +639,17 @@ make.TableS3 <- function(gbk.annotation, duplicate.proteins) {
     return(TableS3)
 }
 
-## Data structure for Figure 2C.
+## Data structure for Figure 4C.
 TableS3 <- make.TableS3(gbk.annotation, duplicate.proteins)
 ## write TableS3 to file.
 write.csv(x=TableS3, file="../results/TableS3.csv")
 
 ######################################################################
-## Supplementary Figure S2: Control for Taxonomy (simpler control than for phylogeny)
+## Supplementary Figure S5: Control for Taxonomy (simpler control than for phylogeny)
 
 ## let's look at the taxonomic distribution of strains with duplicated ARGs.
-duplicated.ARG.seq.genera.summary <- duplicate.proteins %>%
-    tibble() %>% filter(str_detect(product,antibiotic.keywords)) %>%
+duplicated.ARG.seq.genera.summary <- duplicate.ARGs %>%
+    as_tibble() %>%
     mutate(Genus = stringr::word(Organism, 1)) %>%
     group_by(Genus) %>%
     summarize(duplicated.ARG.count = n()) %>%
@@ -419,8 +669,7 @@ all.genera.isolate.summary <- gbk.annotation %>%
     summarize(genome.count = n()) %>%
     arrange(desc(genome.count))
 
-duplicated.genera.isolate.summary <- duplicate.proteins %>%
-    filter(str_detect(.$product,antibiotic.keywords)) %>%
+duplicated.genera.isolate.summary <- duplicate.ARGs %>%
     ## next two lines is to count isolates rather than genes
     select(Annotation_Accession, Organism, Strain, Annotation) %>%
     distinct() %>%
@@ -449,7 +698,7 @@ genera.isolate.comparison.df <- full_join(
 
 ## Hmmm... sampling biases could be problematic,
 ## since antibiotic-resistant bacteria are more likely to be sequenced.
-S2FigA <- genera.isolate.comparison.df %>%
+S5FigA <- genera.isolate.comparison.df %>%
     ggplot(aes(x=sqrt(genome.count),
                y = sqrt(duplicated.ARG.genome.count),
                label = Genus,
@@ -468,24 +717,44 @@ top.ARG.genera.isolates <- gbk.annotation %>%
 filtered.gbk.annotation <- gbk.annotation %>%
     filter(!(Genus %in% top.ARG.genera))
 
-filtered.duplicate.proteins <- duplicate.proteins %>%
+filtered.duplicate.ARGs <- duplicate.ARGs %>%
     filter(!(Genus %in% top.ARG.genera))
 
-filtered.TableS1 <- make.TableS1(filtered.gbk.annotation, filtered.duplicate.proteins)
+filtered.TableS1 <- make.TableS1(filtered.gbk.annotation, filtered.duplicate.ARGs)
 
-S2FigB <- make.confint.figure.panel(filtered.TableS1, order.by.total.isolates, "D-ARGs after\nfiltering top genera")
+S5FigB <- make.confint.figure.panel(filtered.TableS1, order.by.total.isolates, "D-ARGs after\nfiltering top genera")
 
 ## let's check the results, just for the top ARG genera.
-top.ARG.genera.duplicate.proteins <- duplicate.proteins %>%
+top.ARG.genera.duplicate.ARGs <- duplicate.ARGs %>%
     filter(Genus %in% top.ARG.genera)
 
 top.ARG.genera.TableS1 <- make.TableS1(top.ARG.genera.isolates,
-                                       top.ARG.genera.duplicate.proteins)
+                                       top.ARG.genera.duplicate.ARGs)
 
-S2FigC <- make.confint.figure.panel(
+S5FigC <- make.confint.figure.panel(
     top.ARG.genera.TableS1, order.by.total.isolates,
     "D-ARGs in\ntop genera only",
     no.category.label = TRUE)
+
+## let's downsample the data, using Assembly-dereplicator.
+dereplicated.genomes <- read.table("../results/dereplicated-genomes.txt",header=FALSE) %>%
+    rename(fasta_file = V1) %>%
+    mutate(Annotation_Accession=str_replace(fasta_file, "_genomic.fna.gz","")) %>%
+    as_tibble()
+
+dereplicated.gbk.annotation <-  gbk.annotation %>%
+    filter(Annotation_Accession %in% dereplicated.genomes$Annotation_Accession)
+
+dereplicated.duplicate.ARGs <-  duplicate.ARGs %>%
+    filter(Annotation_Accession %in% dereplicated.genomes$Annotation_Accession)
+
+dereplicated.TableS1 <- make.TableS1(
+    dereplicated.gbk.annotation, dereplicated.duplicate.ARGs)
+
+S5FigD <- make.confint.figure.panel(
+    dereplicated.TableS1, order.by.total.isolates,
+    "D-ARGs after downsampling\nby Mash distance > 0.005",
+        no.category.label = FALSE)
 
 ## Let's try an alternative strategy: downsample the data such that only one
 ## sample for each organism is allowed.
@@ -495,38 +764,33 @@ single.organism.gbk.annotation <- gbk.annotation %>%
     filter(row_number() == 1) %>% ## take the first one in the group.
     ungroup()
 
-single.organism.duplicate.proteins <- duplicate.proteins %>%
+single.organism.duplicate.ARGs <- duplicate.ARGs %>%
     filter(Annotation_Accession %in% single.organism.gbk.annotation$Annotation_Accession)
 
-single.organism.singleton.proteins <- singleton.proteins %>%
-    filter(Annotation_Accession %in% single.organism.gbk.annotation$Annotation_Accession)
+##single.organism.singleton.ARGs <- singleton.ARGs %>%
+##    filter(Annotation_Accession %in% single.organism.gbk.annotation$Annotation_Accession)
 
 single.organism.TableS1 <- make.TableS1(
-    single.organism.gbk.annotation, single.organism.duplicate.proteins)
+    single.organism.gbk.annotation, single.organism.duplicate.ARGs)
 
-S2FigD <- make.confint.figure.panel(
+S5FigE <- make.confint.figure.panel(
     single.organism.TableS1, order.by.total.isolates,
     "D-ARGs after\ndownsampling species",
         no.category.label = TRUE)
 
-S2FigBCD <- plot_grid(S2FigB, S2FigC, S2FigD, labels = c("B","C",'D'), nrow = 1, rel_widths = c(1.5, 1, 1, 1))
+S5FigBCDE <- plot_grid(S5FigB, S5FigC, S5FigD, S5FigE,
+                       labels = c("B","C",'D','E'), nrow = 2, rel_widths = c(1.5, 1, 1, 1, 1))
 
-
-S2Fig <- plot_grid(S2FigA, S2FigBCD, labels = c("A", ""), nrow = 2, rel_heights = c(1.3,1))
-
-ggsave("../results/S2Fig.pdf", S2Fig, width=7.5)
-
-rm(single.organism.duplicate.proteins)
-rm(single.organism.singleton.proteins)
-gc()
+S5Fig <- plot_grid(S5FigA, S5FigBCDE, labels = c("A", ""), nrow = 2, rel_heights = c(2,2))
+ggsave("../results/S5Fig.pdf", S5Fig, height = 8, width=7.5)
 
 ##################################################################
-## Figures S1 and S3. Proportion of isolates with duplicated or single-copy ARGs
+## Figures S3 and S6. Proportion of isolates with duplicated or single-copy ARGs
 ## for 12 different antibiotic classes.
 ########################################
-## Figure S1: Duplicated ARGs.
+## Figure S3: Duplicated ARGs.
 
-chloramphenicol.table <- make.IsolateEnrichmentTable(
+ chloramphenicol.table <- make.IsolateEnrichmentTable(
     gbk.annotation,
     duplicate.proteins,
     chloramphenicol.keywords)
@@ -587,57 +851,57 @@ macrolide.table <- make.IsolateEnrichmentTable(
     macrolide.keywords)
 
 
-S1FigA <- make.confint.figure.panel(chloramphenicol.table,
+S3FigA <- make.confint.figure.panel(chloramphenicol.table,
                                     order.by.total.isolates,
                                     "chloramphenicol\nresistance")
-S1FigB <- make.confint.figure.panel(tetracycline.table,
+S3FigB <- make.confint.figure.panel(tetracycline.table,
                                     order.by.total.isolates,
                                     "tetracycline\nresistance",
                                     no.category.label = TRUE)
-S1FigC <- make.confint.figure.panel(MLS.table,
+S3FigC <- make.confint.figure.panel(MLS.table,
                                     order.by.total.isolates,
                                     "MLS\nresistance",
                                     no.category.label = TRUE)
-S1FigD <- make.confint.figure.panel(multidrug.table,
+S3FigD <- make.confint.figure.panel(multidrug.table,
                                     order.by.total.isolates,
                                     "multidrug\nresistance")
-S1FigE <- make.confint.figure.panel(beta.lactam.table,
+S3FigE <- make.confint.figure.panel(beta.lactam.table,
                                     order.by.total.isolates,
                                     "beta-lactam\nresistance",
                                     no.category.label = TRUE)
-S1FigF <- make.confint.figure.panel(glycopeptide.table,
+S3FigF <- make.confint.figure.panel(glycopeptide.table,
                                     order.by.total.isolates,
                                     "glycopeptide\nresistance",
                                     no.category.label = TRUE)
-S1FigG <- make.confint.figure.panel(polypeptide.table,
+S3FigG <- make.confint.figure.panel(polypeptide.table,
                                     order.by.total.isolates,
                                     "polypeptide\nresistance")
-S1FigH <- make.confint.figure.panel(diaminopyrimidine.table,
+S3FigH <- make.confint.figure.panel(diaminopyrimidine.table,
                                     order.by.total.isolates,
                                     "diaminopyrimidine\nresistance",
                                     no.category.label = TRUE)
-S1FigI <- make.confint.figure.panel(sulfonamide.table,
+S3FigI <- make.confint.figure.panel(sulfonamide.table,
                                     order.by.total.isolates,
                                     "sulfonamide\nresistance",
                                     no.category.label = TRUE)
-S1FigJ <- make.confint.figure.panel(quinolone.table,
+S3FigJ <- make.confint.figure.panel(quinolone.table,
                                     order.by.total.isolates,
                                     "quinolone\nresistance")
-S1FigK <- make.confint.figure.panel(aminoglycoside.table,
+S3FigK <- make.confint.figure.panel(aminoglycoside.table,
                                     order.by.total.isolates,
                                     "aminoglycoside\nresistance",
                                     no.category.label = TRUE)
-S1FigL <- make.confint.figure.panel(macrolide.table,
+S3FigL <- make.confint.figure.panel(macrolide.table,
                                     order.by.total.isolates,
                                     "macrolide\nresistance",
                                     no.category.label = TRUE)
 
-S1Fig <- plot_grid(NULL, ## The nesting is to add a title.
+S3Fig <- plot_grid(NULL, ## The nesting is to add a title.
                    plot_grid(
-                       S1FigA, S1FigB, S1FigC,
-                       S1FigD, S1FigE, S1FigF,
-                       S1FigG, S1FigH, S1FigI,
-                       S1FigJ, S1FigK, S1FigL,
+                       S3FigA, S3FigB, S3FigC,
+                       S3FigD, S3FigE, S3FigF,
+                       S3FigG, S3FigH, S3FigI,
+                       S3FigJ, S3FigK, S3FigL,
                    rel_widths = c(1.5, 1, 1,
                                   1.5, 1, 1,
                                   1.5, 1, 1),
@@ -646,9 +910,9 @@ S1Fig <- plot_grid(NULL, ## The nesting is to add a title.
                    ncol = 1,
                    rel_heights = c(0.025, 1))
 
-ggsave("../results/S1Fig.pdf", S1Fig, height = 10.5, width = 8)
+ggsave("../results/S3Fig.pdf", S3Fig, height = 9, width = 13)
 ########################################
-## Figure S3: Single-copy ARGs.
+## Figure S6: Single-copy ARGs.
 
 chloramphenicol.control.table <- make.IsolateEnrichmentControlTable(
     gbk.annotation,
@@ -711,57 +975,57 @@ macrolide.control.table <- make.IsolateEnrichmentControlTable(
     macrolide.keywords)
 
 
-S3FigA <- make.confint.figure.panel(chloramphenicol.control.table,
+S6FigA <- make.confint.figure.panel(chloramphenicol.control.table,
                                       order.by.total.isolates,
                                       "chloramphenicol\nresistance")
-S3FigB <- make.confint.figure.panel(tetracycline.control.table,
+S6FigB <- make.confint.figure.panel(tetracycline.control.table,
                                       order.by.total.isolates,
                                       "tetracycline\nresistance",
                                       no.category.label = TRUE)
-S3FigC <- make.confint.figure.panel(MLS.control.table,
+S6FigC <- make.confint.figure.panel(MLS.control.table,
                                       order.by.total.isolates,
                                       "MLS\nresistance",
                                       no.category.label = TRUE)
-S3FigD <- make.confint.figure.panel(multidrug.control.table,
+S6FigD <- make.confint.figure.panel(multidrug.control.table,
                                       order.by.total.isolates,
                                       "multidrug\nresistance")
-S3FigE <- make.confint.figure.panel(beta.lactam.control.table,
+S6FigE <- make.confint.figure.panel(beta.lactam.control.table,
                                       order.by.total.isolates,
                                       "beta-lactam\nresistance",
                                       no.category.label = TRUE)
-S3FigF <- make.confint.figure.panel(glycopeptide.control.table,
+S6FigF <- make.confint.figure.panel(glycopeptide.control.table,
                                       order.by.total.isolates,
                                       "glycopeptide\nresistance",
                                       no.category.label = TRUE)
-S3FigG <- make.confint.figure.panel(polypeptide.control.table,
+S6FigG <- make.confint.figure.panel(polypeptide.control.table,
                                       order.by.total.isolates,
                                       "polypeptide\nresistance")
-S3FigH <- make.confint.figure.panel(diaminopyrimidine.control.table,
+S6FigH <- make.confint.figure.panel(diaminopyrimidine.control.table,
                                       order.by.total.isolates,
                                       "diaminopyrimidine\nresistance",
                                       no.category.label = TRUE)
-S3FigI <- make.confint.figure.panel(sulfonamide.control.table,
+S6FigI <- make.confint.figure.panel(sulfonamide.control.table,
                                       order.by.total.isolates,
                                       "sulfonamide\nresistance",
                                       no.category.label = TRUE)
-S3FigJ <- make.confint.figure.panel(quinolone.control.table,
+S6FigJ <- make.confint.figure.panel(quinolone.control.table,
                                     order.by.total.isolates,
                                     "quinolone\nresistance")
-S3FigK <- make.confint.figure.panel(aminoglycoside.control.table,
+S6FigK <- make.confint.figure.panel(aminoglycoside.control.table,
                                       order.by.total.isolates,
                                       "aminoglycoside\nresistance",
                                       no.category.label = TRUE)
-S3FigL <- make.confint.figure.panel(macrolide.control.table,
+S6FigL <- make.confint.figure.panel(macrolide.control.table,
                                       order.by.total.isolates,
                                       "macrolide\nresistance",
                                       no.category.label = TRUE)
 
-S3Fig <- plot_grid(NULL, ## The nesting is to add a title.
+S6Fig <- plot_grid(NULL, ## The nesting is to add a title.
                    plot_grid(
-                       S3FigA, S3FigB, S3FigC,
-                       S3FigD, S3FigE, S3FigF,
-                       S3FigG, S3FigH, S3FigI,
-                       S3FigJ, S3FigK, S3FigL,
+                       S6FigA, S6FigB, S6FigC,
+                       S6FigD, S6FigE, S6FigF,
+                       S6FigG, S6FigH, S6FigI,
+                       S6FigJ, S6FigK, S6FigL,
                    rel_widths = c(1.5, 1, 1,
                                   1.5, 1, 1,
                                   1.5, 1, 1),
@@ -769,40 +1033,26 @@ S3Fig <- plot_grid(NULL, ## The nesting is to add a title.
                    labels = c("S-ARGs", ""),
                    ncol = 1,
                    rel_heights = c(0.025, 1))
-ggsave("../results/S3Fig.pdf", S3Fig, height = 10.5, width = 8)
+ggsave("../results/S6Fig.pdf", S6Fig, height = 9, width = 8)
 
 #########################
-## S5 Figure.
+## S12 Figure.
 ## Analysis of duplicate pairs found just on chromosome, just on plasmid, or
 ## on both chromosomes and plasmids.
-
-categorize.as.MGE.ARG.or.other <- function(product) {
-    if (is.na(product))
-        return("Other function")
-    else if (str_detect(product, antibiotic.keywords))
-        return("ARG")
-    else if (str_detect(product, IS.keywords))
-        return("MGE")
-    else
-        return("Other function")
-}
 
 ## let's look at cases of identical sequences on chromosomes and plasmids.
 both.chr.and.plasmid.cases <- duplicate.proteins %>%
     filter(chromosome_count >= 1 & plasmid_count >= 1) %>%
-    mutate(Category = sapply(product, categorize.as.MGE.ARG.or.other)) %>%
     arrange(desc(count)) %>%
     tibble()
-
+    
 just.chromosome.cases <- duplicate.proteins %>%
     filter(chromosome_count >= 1 & plasmid_count == 0) %>%
     arrange(desc(count)) %>%
-    mutate(Category = sapply(product, categorize.as.MGE.ARG.or.other)) %>%
     tibble()
 
 just.plasmid.cases <- duplicate.proteins %>%
     filter(chromosome_count == 0 & plasmid_count >= 1) %>%
-    mutate(Category = sapply(product, categorize.as.MGE.ARG.or.other)) %>%
     arrange(desc(count)) %>%
     tibble()
 
@@ -827,40 +1077,86 @@ just.plasmid.summary <- just.plasmid.cases %>%
                Annotation,
                levels = rev(order.by.total.isolates)))
 
-S5FigA <- ggplot(both.chr.and.plasmid.summary,
+S12FigA <- ggplot(both.chr.and.plasmid.summary,
                   aes(x = Count,
                       y = Annotation, fill = Category)) +
     geom_bar(stat="identity", position = "fill", width = 0.95) +
     theme_classic() +
     ggtitle("Both chromosome and plasmid") +
     theme(legend.position="bottom") +
+    xlab("Frequency") +
     ylab("")
 
-S5Fig.legend <- get_legend(S5FigA)
-S5FigA <- S5FigA + guides(fill = "none")
+S12Fig.legend <- get_legend(S12FigA)
+S12FigA <- S12FigA + guides(fill = "none")
 
-S5FigB <- ggplot(just.chromosome.summary,
+S12FigB <- ggplot(just.chromosome.summary,
                   aes(x = Count,
                       y = Annotation, fill = Category)) +
     geom_bar(stat="identity", position = "fill", width = 0.95) +
     theme_classic() +
     ggtitle("Chromosome only") +
     guides(fill = "none") +
+    xlab("Frequency") +
     ylab("")
 
-S5FigC <- ggplot(just.plasmid.summary,
+S12FigC <- ggplot(just.plasmid.summary,
                   aes(x = Count,
                       y = Annotation, fill = Category)) +
     geom_bar(stat="identity", position = "fill", width = 0.95) +
     theme_classic() +
     ggtitle("Plasmid only") +
     guides(fill = "none") +
+    xlab("Frequency") +
     ylab("")
 
-S5Fig <- plot_grid(NULL, S5FigA, S5FigB, S5FigC, S5Fig.legend, ncol = 1,
-                   labels = c("Genomic distribution\n of D-genes", "A","B","C"),
+S12Fig <- plot_grid(NULL, S12FigA, S12FigB, S12FigC, S12Fig.legend, ncol = 1,
+                   labels = c("Genomic distribution of D-genes", "A","B","C"),
                    rel_heights=c(0.35,1,1,1,0.25))
-ggsave("../results/S5Fig.pdf", S5Fig, width=4, height=8)
+ggsave("../results/S12Fig.pdf", S12Fig, width=5, height=8)
+
+
+## Run some statistics to explicitly test whether
+## duplicated genes encoded solely on plasmids are more likely to encode antibiotic resistance
+## and functions other than those associated with mobile genetic elements,
+## in comparison to both duplicated genes encoded solely on the chromosome,
+## and duplicated genes encoded on plasmids and the chromosome, as is seen in S8Fig.
+
+category.summed.both.chr.and.plasmid <- both.chr.and.plasmid.summary %>%
+    group_by(Category) %>%
+    summarize(summed_count = sum(Count))
+
+category.summed.just.chromosome <- just.chromosome.summary %>%
+    group_by(Category) %>%
+    summarize(summed_count = sum(Count))
+
+category.summed.just.plasmid <- just.plasmid.summary %>%
+    group_by(Category) %>%
+    summarize(summed_count = sum(Count))
+
+both.chr.and.plasmid.test.vec <- c(
+    filter(category.summed.both.chr.and.plasmid,Category=='ARG')$summed_count
+    + filter(category.summed.both.chr.and.plasmid,Category=='Other function')$summed_count,
+    filter(category.summed.both.chr.and.plasmid,Category=='MGE')$summed_count)
+
+just.plasmid.test.vec <- c(
+    filter(category.summed.just.plasmid,Category=='ARG')$summed_count
+    + filter(category.summed.just.plasmid,Category=='Other function')$summed_count,
+    filter(category.summed.just.plasmid,Category=='MGE')$summed_count)
+
+just.chromosome.test.vec <- c(
+    filter(category.summed.just.chromosome,Category=='ARG')$summed_count
+    + filter(category.summed.just.chromosome,Category=='Other function')$summed_count,
+    filter(category.summed.just.chromosome,Category=='MGE')$summed_count)
+
+## test 1: compare proportions between just.plasmid and just.chromosome.
+binom.test(just.plasmid.test.vec,p=just.chromosome.test.vec[1]/sum(just.chromosome.test.vec))
+binom.test(just.plasmid.test.vec,p=just.chromosome.test.vec[1]/sum(just.chromosome.test.vec))$p.value
+
+## test 2: compare proportions between just.plasmid and both plasmid and chromosome.
+binom.test(just.plasmid.test.vec,p=both.chr.and.plasmid.test.vec[1]/sum(both.chr.and.plasmid.test.vec))
+binom.test(just.plasmid.test.vec,p=both.chr.and.plasmid.test.vec[1]/sum(both.chr.and.plasmid.test.vec))$p.value
+
 
 ######################################################################
 ## Table S4. Show number of duplicated genes on chromosomes, and number of
@@ -881,14 +1177,12 @@ make.TableS4 <- function(duplicate.proteins) {
         summarize(plasmid_duplicate_genes = sum(plasmid_count))
     
     ## Column 3
-    duplicate.chromosome.ARGs.count <- duplicate.proteins %>%
-        filter(str_detect(.$product,antibiotic.keywords)) %>%
+    duplicate.chromosome.ARGs.count <- duplicate.ARGs %>%
         group_by(Annotation) %>%
         summarize(chromosomal_duplicate_ARGs = sum(chromosome_count))
     
     ## Column 4
-    duplicate.plasmid.ARGs.count <- duplicate.proteins %>%
-        filter(str_detect(.$product,antibiotic.keywords)) %>%
+    duplicate.plasmid.ARGs.count <- duplicate.ARGs %>%
         group_by(Annotation) %>%
         summarize(plasmid_duplicate_ARGs = sum(plasmid_count))
     
@@ -968,15 +1262,13 @@ make.TableS5 <- function(singleton.proteins) {
     gc() ## free memory when dealing with singleton.proteins.
 
     ## Column 3
-    singleton.chromosome.ARGs.count <- singleton.proteins %>%
-        filter(str_detect(.$product,antibiotic.keywords)) %>%
+    singleton.chromosome.ARGs.count <- singleton.ARGs %>%
         group_by(Annotation) %>%
         summarize(chromosomal_singleton_ARGs = sum(chromosome_count))
     gc() ## free memory when dealing with singleton.proteins.
     
     ## Column 4
-    singleton.plasmid.ARGs.count <- singleton.proteins %>%
-        filter(str_detect(.$product,antibiotic.keywords)) %>%
+    singleton.plasmid.ARGs.count <- singleton.ARGs %>%
         group_by(Annotation) %>%
         summarize(plasmid_singleton_ARGs = sum(plasmid_count))
     gc() ## free memory when dealing with singleton.proteins.
@@ -1024,12 +1316,12 @@ plasmid.chromosome.singleton.ARG.contingency.test <- function(TableS5) {
 
 plasmid.chromosome.singleton.ARG.contingency.test(TableS5)
 ################################################################################
-## Use the data in Tables S4 and S5 to make the data structures for Figure 2DEFGHI.
+## Use the data in Tables S4 and S5 to make the data structures for Figure 4DEFGHI.
 ## The point of this figure is to show that the distribution of
 ## duplicated ARGs is not predicted by the distribution of single-copy ARGs
 ## in the ecological categories.
 
-make.Fig2DEFGHI.df <- function(TableS1, TableS4, TableS5) {
+make.Fig4DEFGHI.df <- function(TableS1, TableS4, TableS5) {
     order.by.total_isolates <- TableS1$Annotation
     
     df <- full_join(TableS4, TableS5) %>%
@@ -1051,8 +1343,8 @@ make.Fig2DEFGHI.df <- function(TableS1, TableS4, TableS5) {
 }
 
 
-Fig2DEFGHI.df <- make.Fig2DEFGHI.df(TableS1, TableS4, TableS5)
-## Figure 2DEFGHI.
+Fig4DEFGHI.df <- make.Fig4DEFGHI.df(TableS1, TableS4, TableS5)
+## Figure 4DEFGHI.
 ## Plot point estimates for the fraction of chromosomal genes that are
 ## the fraction of genes that are duplicated ARGs (panel D),
 ## the fraction of chromosomal genes that are duplicated ARGs (panel E),
@@ -1061,8 +1353,8 @@ Fig2DEFGHI.df <- make.Fig2DEFGHI.df(TableS1, TableS4, TableS5)
 ## the fraction of chromosomal genes that are single-copy ARGs (panel H),
 ## the fraction of plasmid genes that are single-copy ARGs (panel I),
 
-## Fig2D
-Fig2D.df <- Fig2DEFGHI.df %>%
+## Fig4D
+Fig4D.df <- Fig4DEFGHI.df %>%
     mutate(p = total_duplicate_ARGs/(total_genes)) %>%
     ## use the normal approximation for binomial proportion conf.ints
     mutate(se = sqrt(p*(1-p)/total_genes)) %>%
@@ -1077,8 +1369,8 @@ Fig2D.df <- Fig2DEFGHI.df %>%
            p, Left, Right)
 
 
-## Fig2E: the fraction of chromosomal genes that are duplicated ARGs.
-Fig2E.df <- Fig2DEFGHI.df %>%
+## Fig4E: the fraction of chromosomal genes that are duplicated ARGs.
+Fig4E.df <- Fig4DEFGHI.df %>%
     mutate(p = chromosomal_duplicate_ARGs/(total_chromosomal_genes)) %>%
     ## use the normal approximation for binomial proportion conf.ints
     mutate(se = sqrt(p*(1-p)/total_chromosomal_genes)) %>%
@@ -1092,7 +1384,7 @@ Fig2E.df <- Fig2DEFGHI.df %>%
     select(Annotation, chromosomal_duplicate_ARGs, total_chromosomal_genes,
            p, Left, Right)
 
-Fig2F.df <- Fig2DEFGHI.df %>%
+Fig4F.df <- Fig4DEFGHI.df %>%
     mutate(p = plasmid_duplicate_ARGs/(total_plasmid_genes)) %>%
     ## use the normal approximation for binomial proportion conf.ints
     mutate(se = sqrt(p*(1-p)/total_plasmid_genes)) %>%
@@ -1106,7 +1398,7 @@ Fig2F.df <- Fig2DEFGHI.df %>%
     select(Annotation, plasmid_duplicate_ARGs, total_plasmid_genes,
            p, Left, Right)
 
-Fig2G.df <- Fig2DEFGHI.df %>%
+Fig4G.df <- Fig4DEFGHI.df %>%
     mutate(p = total_singleton_ARGs/(total_genes)) %>%
     ## use the normal approximation for binomial proportion conf.ints
     mutate(se = sqrt(p*(1-p)/total_genes)) %>%
@@ -1121,7 +1413,7 @@ Fig2G.df <- Fig2DEFGHI.df %>%
     select(Annotation, total_singleton_ARGs, total_genes,
            p, Left, Right)
 
-Fig2H.df <- Fig2DEFGHI.df %>%
+Fig4H.df <- Fig4DEFGHI.df %>%
     mutate(p = chromosomal_singleton_ARGs/(total_chromosomal_genes)) %>%
     ## use the normal approximation for binomial proportion conf.ints
     mutate(se = sqrt(p*(1-p)/total_chromosomal_genes)) %>%
@@ -1136,7 +1428,7 @@ Fig2H.df <- Fig2DEFGHI.df %>%
            p, Left, Right)
 
 
-Fig2I.df <- Fig2DEFGHI.df %>%
+Fig4I.df <- Fig4DEFGHI.df %>%
     mutate(p = plasmid_singleton_ARGs/(total_plasmid_genes)) %>%
     ## use the normal approximation for binomial proportion conf.ints
     mutate(se = sqrt(p*(1-p)/total_plasmid_genes)) %>%
@@ -1151,7 +1443,7 @@ Fig2I.df <- Fig2DEFGHI.df %>%
            p, Left, Right)
 
 
-make.Fig2DEFGHI.panel <- function(Table, order.by.total.isolates, title,
+make.Fig4DEFGHI.panel <- function(Table, order.by.total.isolates, title,
                             xlabel, no.category.label = FALSE) {
     panel <- Table %>%
         mutate(Annotation = factor(
@@ -1174,79 +1466,115 @@ make.Fig2DEFGHI.panel <- function(Table, order.by.total.isolates, title,
     return(panel)
 }
 
-## Finally -- make Figure 2ABC.
-Fig2A <- make.confint.figure.panel(TableS1, order.by.total.isolates, "D-ARGs") +
-        scale_x_continuous(breaks = c(0, 0.15))
 
-Fig2B <- make.confint.figure.panel(TableS2, order.by.total.isolates,
-                                   "S-ARGs", no.category.label=TRUE) +
-    scale_x_continuous(breaks = c(0.85, 1.0))
+## Finally -- make Figure 4ABC.
+## Throughout, add special scales for Figure 4 but not for Supplementary Figure S15.
+Fig4A <- make.confint.figure.panel(TableS1, order.by.total.isolates, "D-ARGs")
+if (! USE.CARD.AND.MOBILE.OG.DB) {
+    Fig4A <- Fig4A +
+        scale_x_continuous(breaks = c(0, 0.15), limits = c(0,0.16))
+}
 
-Fig2C <- make.confint.figure.panel(TableS3, order.by.total.isolates,
-                                   "All D-genes", no.category.label=TRUE) +
-    scale_x_continuous(breaks = c(0.75, 0.95))
+Fig4B <- make.confint.figure.panel(TableS2, order.by.total.isolates,
+                                   "S-ARGs", no.category.label=TRUE)
+if (! USE.CARD.AND.MOBILE.OG.DB) {
+    Fig4B <- Fig4B +
+        scale_x_continuous(breaks = c(0.85, 1.0), limits = c(0.85,1))
+}
 
-Fig2ABC.title <- title_theme <- ggdraw() +
+Fig4C <- make.confint.figure.panel(TableS3, order.by.total.isolates,
+                                   "All D-genes", no.category.label=TRUE)
+if (! USE.CARD.AND.MOBILE.OG.DB) {
+    Fig4C <- Fig4C +
+        scale_x_continuous(breaks = c(0.75, 0.95), limits = c(0.75, 1.0))
+}
+
+Fig4ABC.title <- title_theme <- ggdraw() +
     draw_label("Isolate-level analysis",fontface="bold")
 
-Fig2ABC <- plot_grid(Fig2A, Fig2B, Fig2C, labels=c('A','B','C'),
+Fig4ABC <- plot_grid(Fig4A, Fig4B, Fig4C, labels=c('A','B','C'),
                      rel_widths = c(1.5,1,1), nrow=1)
 
-Fig2ABC.with.title <- plot_grid(Fig2ABC.title, Fig2ABC, ncol = 1, rel_heights = c(0.1, 1))
+Fig4ABC.with.title <- plot_grid(Fig4ABC.title, Fig4ABC, ncol = 1, rel_heights = c(0.1, 1))
 
-## the rest of Figure 2 -- Fig2DEFGHI -- requires Tables S4 and S5.
+## the rest of Figure 4 -- Fig4DEFGHI -- requires Tables S4 and S5.
 ## I manually set axis labels so that they don't run into each other.
-Fig2D <- make.Fig2DEFGHI.panel(Fig2D.df, order.by.total.isolates,
+Fig4D <- make.Fig4DEFGHI.panel(Fig4D.df, order.by.total.isolates,
                          "\nD-ARGs",
-                         "% of\nall genes") +
-    scale_x_continuous(label=fancy_scientific, breaks = c(0, 2e-4), limits = c(0,2.2e-4))
-Fig2E <- make.Fig2DEFGHI.panel(Fig2E.df, order.by.total.isolates,
-                         "Chromosome:\nD-ARGs",
-                         "% of\nchromosomal genes",
-                         no.category.label = TRUE) +
-    scale_x_continuous(label=fancy_scientific, breaks = c(0, 8e-5), limits = c(0,9e-5))
-Fig2F <- make.Fig2DEFGHI.panel(Fig2F.df, order.by.total.isolates,
-                         "Plasmids:\nD-ARGs",
-                         "% of\nplasmid genes",
-                         no.category.label = TRUE) +
-    scale_x_continuous(label=fancy_scientific, breaks = c(0, 5e-3), limits = c(0,5.4e-3))
-Fig2G <- make.Fig2DEFGHI.panel(Fig2G.df, order.by.total.isolates,
-                         "\nS-ARGs",
-                         "% of\nall genes") +
-    scale_x_continuous(label=fancy_scientific, breaks = c(3.5e-3, 7e-3), limits = c(3.5e-3,7.4e-3))
-Fig2H <- make.Fig2DEFGHI.panel(Fig2H.df, order.by.total.isolates,
-                         "Chromosome:\nS-ARGs",
-                         "% of\nchromosomal genes",
-                         no.category.label = TRUE) +
-    scale_x_continuous(label=fancy_scientific, breaks = c(4e-3, 6e-3))
-Fig2I <- make.Fig2DEFGHI.panel(Fig2I.df, order.by.total.isolates,
-                         "Plasmids:\nS-ARGs",
-                         "% of\nplasmid genes",
-                         no.category.label = TRUE) +
-    scale_x_continuous(label=fancy_scientific, breaks = c(3e-3, 2e-2))
+                         "Proportion of\nall genes")
+if (! USE.CARD.AND.MOBILE.OG.DB) {
+    Fig4D <- Fig4D +
+        scale_x_continuous(label=fancy_scientific, breaks = c(0, 2e-4), limits = c(0,2.5e-4))
+}
 
-Fig2DEFGHI.title <- title_theme <- ggdraw() +
+Fig4E <- make.Fig4DEFGHI.panel(Fig4E.df, order.by.total.isolates,
+                         "Chromosome:\nD-ARGs",
+                         "Proportion of\nchromosomal genes",
+                         no.category.label = TRUE)
+if (! USE.CARD.AND.MOBILE.OG.DB) {
+    Fig4E <- Fig4E +
+        scale_x_continuous(label=fancy_scientific, breaks = c(0, 8e-5), limits = c(0,1.2e-4))
+}
+
+Fig4F <- make.Fig4DEFGHI.panel(Fig4F.df, order.by.total.isolates,
+                         "Plasmids:\nD-ARGs",
+                         "Proportion of\nplasmid genes",
+                         no.category.label = TRUE)
+if (! USE.CARD.AND.MOBILE.OG.DB) {
+    Fig4F <- Fig4F +
+        scale_x_continuous(label=fancy_scientific, breaks = c(0, 5e-3), limits = c(0,6e-3))
+}
+
+Fig4G <- make.Fig4DEFGHI.panel(Fig4G.df, order.by.total.isolates,
+                         "\nS-ARGs",
+                         "Proportion of\nall genes")
+if (! USE.CARD.AND.MOBILE.OG.DB) {
+    Fig4G <- Fig4G +
+        scale_x_continuous(label=fancy_scientific, breaks = c(3.5e-3, 7e-3), limits = c(3e-3,7.4e-3))
+}
+
+Fig4H <- make.Fig4DEFGHI.panel(Fig4H.df, order.by.total.isolates,
+                         "Chromosome:\nS-ARGs",
+                         "Proportion of\nchromosomal genes",
+                         no.category.label = TRUE)
+if (! USE.CARD.AND.MOBILE.OG.DB) {
+    Fig4H <- Fig4H +
+        scale_x_continuous(label=fancy_scientific, breaks = c(4e-3, 6e-3), limits = c(3e-3, 6e-3))
+}
+
+Fig4I <- make.Fig4DEFGHI.panel(Fig4I.df, order.by.total.isolates,
+                         "Plasmids:\nS-ARGs",
+                         "Proportion of\nplasmid genes",
+                         no.category.label = TRUE)
+if (! USE.CARD.AND.MOBILE.OG.DB) {
+    Fig4I <- Fig4I +
+        scale_x_continuous(label=fancy_scientific, breaks = c(3e-3, 2e-2))
+}
+
+Fig4DEFGHI.title <- title_theme <- ggdraw() +
     draw_label("Gene-level analysis",fontface="bold")
 
-Fig2DEFGHI <- plot_grid(Fig2D, Fig2E, Fig2F, Fig2G, Fig2H, Fig2I,
+Fig4DEFGHI <- plot_grid(Fig4D, Fig4E, Fig4F, Fig4G, Fig4H, Fig4I,
                   labels = c('D','E','F','G','H','I'), nrow=2,
                   rel_widths = c(1.5, 1, 1, 1.5, 1, 1))
 
-Fig2DEFGHI.with.title <- plot_grid(Fig2DEFGHI.title, Fig2DEFGHI,
+Fig4DEFGHI.with.title <- plot_grid(Fig4DEFGHI.title, Fig4DEFGHI,
                                    ncol = 1, rel_heights = c(0.06, 1))
 
-## Now, make the complete Figure 2!
-Fig2 <- plot_grid(Fig2ABC.with.title, Fig2DEFGHI.with.title,
+## Now, make the complete Figure 4!
+Fig4 <- plot_grid(Fig4ABC.with.title, Fig4DEFGHI.with.title,
                   ncol = 1, rel_heights = c(0.3,0.7))
 
-ggsave("../results/Fig2.pdf", Fig2, height=8, width=5.6)
+if (! USE.CARD.AND.MOBILE.OG.DB) { ## Make main figure 4.
+    ggsave("../results/Fig4.pdf", Fig4, height=6.25, width=6.25)
+} else { ## Make supplementary Figure S15.
+    ggsave("../results/S15Fig.pdf", Fig4, height=6.25, width=6.25)
+}
 
 ##########################################################################
-## Figure 3: Visualization of ARGs on plasmids and chromosomes, and evidence for selection.
-
-## set up data structures for Figure 3AB.
-Fig3A.data <- duplicate.proteins %>%
-    mutate(Category = sapply(product, categorize.as.MGE.ARG.or.other)) %>%
+## Figure 5: Visualization of ARGs on plasmids and chromosomes, and evidence for selection.
+## set up data structures for Figure 5AB.
+Fig5A.data <- duplicate.proteins %>%
     group_by(Annotation, Category) %>%
     summarize(Plasmid = sum(plasmid_count), Chromosome = sum(chromosome_count)) %>%
     pivot_longer(cols = c("Plasmid", "Chromosome"),
@@ -1256,8 +1584,7 @@ Fig3A.data <- duplicate.proteins %>%
                Annotation,
                levels = rev(order.by.total.isolates)))
 
-Fig3B.data <- singleton.proteins %>%
-    mutate(Category = sapply(product, categorize.as.MGE.ARG.or.other)) %>%
+Fig5B.data <- singleton.proteins %>%
     group_by(Annotation, Category) %>%
     summarize(Plasmid = sum(plasmid_count), Chromosome = sum(chromosome_count)) %>%
     pivot_longer(cols = c("Plasmid", "Chromosome"),
@@ -1267,36 +1594,42 @@ Fig3B.data <- singleton.proteins %>%
                Annotation,
                levels = rev(order.by.total.isolates)))
 
-Fig3A <- ggplot(Fig3A.data, aes(x = Count, y = Annotation, fill = Category)) +
+Fig5A <- ggplot(Fig5A.data, aes(x = Count, y = Annotation, fill = Category)) +
     geom_bar(stat="identity", position = "fill", width = 0.95) +
     facet_wrap(.~Episome) +
     theme_classic() +
-    xlab("% of D-genes") +
+    xlab("Proportion of D-genes") +
     scale_x_continuous(breaks = c(0,1)) +
     theme(legend.position="bottom") +
     theme(strip.background = element_blank()) +
     ylab("") ## remove the redundant "Annotation" label on the y-axis.
 
-Fig3legend <- get_legend(Fig3A)
-Fig3A <- Fig3A + guides(fill = "none")
+Fig5legend <- get_legend(Fig5A)
+Fig5A <- Fig5A + guides(fill = "none")
 
-Fig3B <- ggplot(Fig3B.data, aes(x = Count, y = Annotation, fill = Category)) +
+Fig5B <- ggplot(Fig5B.data, aes(x = Count, y = Annotation, fill = Category)) +
     geom_bar(stat="identity", position = "fill", width = 0.95) +
     facet_wrap(.~Episome) +
     theme_classic() +
-    xlab("% of S-genes") +
+    xlab("Proportion of S-genes") +
     scale_x_continuous(breaks = c(0,1)) +
     guides(fill = "none") +
     theme(strip.background = element_blank()) +
     theme(axis.text.y=element_blank()) +
     ylab("") ## remove the redundant "Annotation" label on the y-axis.
 
-## remove the dataframes to save memory.
-rm(Fig3A.data)
-rm(Fig3B.data)
-gc()
+## let's get the actual numbers of duplicated MGE genes in the plasmid and chromosome,
+## to report in the main text.
+category.summed.D.genes <- Fig5A.data %>%
+    group_by(Category, Episome) %>%
+    summarize(summed_count = sum(Count))
 
-## Figure 3C: 
+category.summed.S.genes <- Fig5B.data %>%
+    group_by(Category, Episome) %>%
+    summarize(summed_count = sum(Count))
+
+
+## Figure 5C: 
 ## The observed ecological distribution of duplicate genes is driven by either
 ## selection, HGT, or associations with MGEs.
 
@@ -1315,30 +1648,17 @@ gc()
 ## Supplementary Figures.
 
 make.selection.test.df <- function(duplicate.proteins, singleton.proteins,
-                                   order.by.total.isolates,
-                                   keywords, negate = FALSE) {
+                                   order.by.total.isolates, category.string) {
 
-    if (negate) { ## then negate the str_detect for the keywords.
-        duplicated.function.per.category <- duplicate.proteins %>%
-            filter(!str_detect(.$product, keywords)) %>%
-            group_by(Annotation) %>%
-            summarize(function.duplicates = sum(count))
-        
-        singleton.function.per.category <- singleton.proteins %>%
-            filter(!str_detect(.$product, keywords)) %>%
-            group_by(Annotation) %>%
-            summarize(function.singletons = sum(count))
-    } else {
-        duplicated.function.per.category <- duplicate.proteins %>%
-            filter(str_detect(.$product, keywords)) %>%
-            group_by(Annotation) %>%
-            summarize(function.duplicates = sum(count))
-        
-        singleton.function.per.category <- singleton.proteins %>%
-            filter(str_detect(.$product, keywords)) %>%
-            group_by(Annotation) %>%
-            summarize(function.singletons = sum(count))
-    }
+    duplicated.function.per.category <- duplicate.proteins %>%
+        filter(Category == category.string) %>%
+        group_by(Annotation) %>%
+        summarize(function.duplicates = sum(count))
+    
+    singleton.function.per.category <- singleton.proteins %>%
+        filter(Category == category.string) %>%
+        group_by(Annotation) %>%
+        summarize(function.singletons = sum(count))
 
     duplicated.genes.per.category <- duplicate.proteins %>%
         group_by(Annotation) %>%
@@ -1359,66 +1679,154 @@ make.selection.test.df <- function(duplicate.proteins, singleton.proteins,
         mutate(dup.singleton.ratio = p/q) %>%
         mutate(Annotation = factor(
                    Annotation,
-                   levels = rev(order.by.total.isolates)))
+                   levels = rev(order.by.total.isolates))) %>%
+        mutate(Category = category.string)
+    
     return(selection.test.df)
 }
 
 
 ARG.selection.test.df <- make.selection.test.df(
-    duplicate.proteins,
-    singleton.proteins,
-    order.by.total.isolates,
-    antibiotic.keywords) %>%
-    select(Annotation, dup.singleton.ratio) %>%
-    mutate(Category = "ARG")
+    duplicate.proteins, singleton.proteins,
+    order.by.total.isolates, "ARG") %>%
+    select(Annotation, Category, dup.singleton.ratio)
 
 MGE.selection.test.df <- make.selection.test.df(
-    duplicate.proteins,
-    singleton.proteins,
-    order.by.total.isolates,
-    IS.keywords) %>%
-    select(Annotation, dup.singleton.ratio) %>%
-    mutate(Category = "MGE")
+    duplicate.proteins, singleton.proteins,
+    order.by.total.isolates, "MGE") %>%
+    select(Annotation, Category, dup.singleton.ratio)
 
 other.selection.test.df <- make.selection.test.df(
-    duplicate.proteins,
-    singleton.proteins,
-    order.by.total.isolates,
-    antibiotic.or.IS.keywords, negate = TRUE) %>%
-    select(Annotation, dup.singleton.ratio) %>%
-    mutate(Category = "Other function")
-
+    duplicate.proteins, singleton.proteins,
+    order.by.total.isolates, "Other function") %>%
+    select(Annotation, Category, dup.singleton.ratio)
 
 big.selection.test.df <- ARG.selection.test.df %>%
     full_join(MGE.selection.test.df) %>%
     full_join(other.selection.test.df)
 
-Fig3C <- big.selection.test.df %>%
-    ggplot(aes(y = Annotation, x = dup.singleton.ratio, color = Category)) +
+
+Fig5C <- big.selection.test.df %>%
+    ggplot(aes(y = Annotation, x = log(dup.singleton.ratio), color = Category)) +
     geom_point() + theme_classic() +
-    geom_vline(xintercept = 1, color = "red", linetype = "dashed") +
-    xlim(0,33) +
-    xlab("(% of D-genes) / (% of S-genes)") +
+    geom_vline(xintercept = 0, color = "red", linetype = "dashed") +
+    xlab("log(% of D-genes / % of S-genes)") +
     ##xlab(TeX("\\frac{% of D-genes}{% of S-genes}")) +
     guides(color = "none") +
     theme(axis.text.y=element_blank()) +
     ylab("") ## remove the redundant "Annotation" label on the y-axis.
 
-mainFig3 <- plot_grid(Fig3A, Fig3B, Fig3C, labels = c('A','B','C'), nrow = 1, rel_widths=c(1.4,1,1),
-                  align = 'h', axis = 'tb')
+################################################################################
+## Write Fig5 ABC to file. Fig 5D is a diagram of a workflow, and Figure 5E is produced at the end
+## of this script.
+Fig5.top.panels <- plot_grid(Fig5A, Fig5B, Fig5C, labels = c('A','B','C'), nrow = 1, rel_widths=c(1.4,1,1),
+              align = 'h', axis = 'tb')
+Fig5ABC <- plot_grid(Fig5.top.panels, Fig5legend, ncol = 1, rel_heights = c(1,0.2))
 
-Fig3 <- plot_grid(mainFig3, Fig3legend, ncol = 1, rel_heights = c(1,0.2))
+if (USE.CARD.AND.MOBILE.OG.DB) { ## Then save as a Supplementary Figure.
+    ggsave("../results/S17Fig.pdf", Fig5ABC, width=8.75, height=4)
+} else { ## save as a main Figure.
+    ggsave("../results/Fig5ABC.pdf", Fig5ABC, width=8.75, height=4)
+}
 
-ggsave("../results/Fig3.pdf", Fig3, width=8.5, height=3.5)
 
 ################################################################################
-## Figure 4A. A deterministic ODE model demonstrates that selection can
-## drive the evolution of duplicated ARGs on plasmids.
+## compare linkage between D-ARGs and MGE-genes and S-ARGs and MGE-genes.
+## These calculations go into the manuscript, but no specific figure.
 
-## The panels of this figure are generated in my Pluto notebook:
-## duplication-linear-ODE-model.jl.
+ARG.MGE.adjacency.data <- read.csv("../results/ARG-MGE-adjacency-counts.csv") %>%
+    pivot_longer(cols=everything(), names_to="original_column", values_to = "Count") %>%
+    mutate(ARG.class = ifelse(str_detect(original_column,"dARG"),"D-ARGs","S-ARGs")) %>%
+    mutate(next.to.MGE = ifelse(str_detect(original_column,"not"),FALSE,TRUE))
+
+ARG.MGE.adjacency.total <- ARG.MGE.adjacency.data %>% group_by(ARG.class) %>%
+    summarize(ARG.total=sum(Count))
+
+ARGs.next.to.MGEs <- filter(ARG.MGE.adjacency.data,
+                             next.to.MGE==TRUE) %>%
+    rename(next.to.MGE.count=Count) %>%
+    select(ARG.class, next.to.MGE.count)
+
+ARG.MGE.adjacency.df <- full_join(ARG.MGE.adjacency.total, ARGs.next.to.MGEs) %>%
+    mutate(percent.next.to.MGE = next.to.MGE.count/ARG.total)
+
+## formally calculate statistical significance with a binomial test.
+ARG.MGE.adjacency.statistic <- binom.test(
+    x=filter(ARG.MGE.adjacency.df,ARG.class=="D-ARGs")$next.to.MGE.count, ## x = 3769
+    n=filter(ARG.MGE.adjacency.df,ARG.class=="D-ARGs")$ARG.total, ## n = 8168
+    p = filter(ARG.MGE.adjacency.df,ARG.class=="S-ARGs")$percent.next.to.MGE)
+
+
 ################################################################################
-## Supplementary Figure S4.
+## Analysis of clinical antibiotic resistant isolates.
+
+make.clinical.genomes.D.ARG.Figure <- function(clinical.duplicate.proteins, clinical.singleton.proteins, panelA.title) {
+    
+    FigA.data <- clinical.duplicate.proteins %>%
+        mutate(Category = sapply(product, categorize.as.MGE.ARG.or.other)) %>%
+        group_by(Annotation_Accession, Category) %>%
+        summarize(Count = sum(count))
+
+    FigB.data <- clinical.singleton.proteins %>%
+        mutate(Category = sapply(product, categorize.as.MGE.ARG.or.other)) %>%
+        group_by(Annotation_Accession, Category) %>%
+        summarize(Count = sum(count))
+
+    FigA1 <- ggplot(FigA.data, aes(x = Count, y = Annotation_Accession, fill = Category)) +
+        geom_bar(stat="identity") +
+        theme_classic() +
+        theme(legend.position="top") +
+        ylab("") ## remove the redundant "Annotation" label on the y-axis.
+
+    Figlegend <- get_legend(FigA1)
+    FigA1 <- FigA1 + guides(fill = "none")
+
+    FigA2 <- ggplot(FigA.data, aes(x = Count, y = Annotation_Accession, fill = Category)) +
+        geom_bar(stat="identity", position = "fill") +
+        theme_classic() +
+        ## remove genome name labels.
+        theme(axis.text.y=element_blank()) +
+        guides(fill = "none") +
+        xlab("Frequency") +
+        ylab("") ## remove the redundant "Annotation" label on the y-axis.
+
+    FigA.title <- ggdraw() + draw_label(panelA.title, fontface='bold')
+
+    FigA <- plot_grid(FigA.title, Figlegend,
+                   plot_grid(FigA1, FigA2, labels = c("A",""),
+                             nrow=1, rel_widths=c(2,1)),
+                   nrow=3, rel_heights=c(0.1,0.1,2))
+
+    FigB1 <- ggplot(FigB.data, aes(x = Count, y = Annotation_Accession, fill = Category)) +
+        geom_bar(stat="identity") +
+        theme_classic() +
+        guides(fill = "none") +
+        ## remove genome name labels.
+        theme(axis.text.y=element_blank()) +
+        ylab("") ## remove the redundant "Annotation" label on the y-axis.
+
+    FigB2 <- ggplot(FigB.data, aes(x = Count, y = Annotation_Accession, fill = Category)) +
+        geom_bar(stat="identity", position = "fill") +
+        theme_classic() +
+        ## remove genome name labels.
+        theme(axis.text.y=element_blank()) +
+        guides(fill = "none") +
+        xlab("Frequency") +
+        ylab("") ## remove the redundant "Annotation" label on the y-axis.
+
+    FigB.title <- ggdraw() + draw_label("Corresponding distribution\nof single-copy genes", fontface='bold')
+
+    FigB <- plot_grid(FigB.title,
+                      plot_grid(FigB1, FigB2, labels = c("B",""),
+                                nrow=1, rel_widths=c(1,1)),
+                      nrow=2, rel_heights=c(0.2,2))
+    
+    FullFig <- plot_grid(FigA, FigB, ncol = 2, rel_widths = c(1.5,1))
+    return(FullFig)
+}
+
+################################################################################
+## Supplementary Figure S7.
 ## Let's analyze duplicated genes in the 12 GN0XXXX genomes that were sequenced with
 ## long-read technology (PacBio) by Vance Fowler's lab.
 ## Jon Bethke characterized the resistances of these strains, and additionally
@@ -1427,6 +1835,9 @@ ggsave("../results/Fig3.pdf", Fig3, width=8.5, height=3.5)
 ## 58,092 types of protein sequences in the 12 ESBL genomes.
 Duke.ESBL.all.proteins <- data.table::fread("../results/Duke-ESBL-all-proteins.csv",
                                   drop="sequence")
+
+## assert that this is an independent dataset.
+stopifnot(nrow(filter(Duke.ESBL.all.proteins, Annotation_Accession %in% gbk.annotation$Annotation_Accession)) == 0)
 
 ## 57,263 single-copy protein sequences.
 Duke.ESBL.singleton.proteins <- Duke.ESBL.all.proteins %>%
@@ -1437,123 +1848,175 @@ Duke.ESBL.duplicate.proteins <- read.csv(
     "../results/Duke-ESBL-duplicate-proteins.csv") %>%
     select(-sequence)
 
-## 6 of the 12 strains have duplicated ARGs.
-## 10 ARG sequences have duplicates.
 Duke.ESBL.duplicate.ARGs <- Duke.ESBL.duplicate.proteins %>%
     filter(str_detect(.$product,antibiotic.keywords))
-sum(Duke.ESBL.duplicate.ARGs$count) ## 23 duplicated ARGs in total.
+sum(Duke.ESBL.duplicate.ARGs$count)
 
-## 215 MGE protein sequences are duplicated.
-Duke.ESBL.duplicate.MGE.proteins <- Duke.ESBL.duplicate.proteins %>%
-    filter(str_detect(.$product,IS.keywords))
-sum(Duke.ESBL.duplicate.MGE.proteins$count) ## 547 duplicated MGE proteins in total.
+## 6/12 strains have duplicate ARGs.
+length(unique(Duke.ESBL.duplicate.ARGs$Annotation_Accession))
+length(unique(Duke.ESBL.singleton.proteins$Annotation_Accession))
 
-## 208 unknown protein sequences are duplicated.
-Duke.ESBL.duplicate.unknown.proteins <- Duke.ESBL.duplicate.proteins %>%
-    ## some hypothetical proteins are "ISXX family insertion sequence hypothetical protein"
-    ## so filter out those cases.
-    filter(!str_detect(.$product,IS.keywords)) %>%
-    filter(str_detect(.$product,unknown.protein.keywords))
-sum(Duke.ESBL.duplicate.unknown.proteins$count) ## 450 duplicated unknown proteins in total.
+## Now make Supplementary Figure S7.
+S7Fig <- make.clinical.genomes.D.ARG.Figure(Duke.ESBL.duplicate.proteins, Duke.ESBL.singleton.proteins,
+                                            "Distribution of duplicated genes in 12 ESBL-resistant isolates\nfrom Duke Hospital")
+ggsave("../results/S7Fig.pdf", S7Fig, height = 9, width = 10)
 
-## 396 remaining cases of duplicated proteins.
-Duke.ESBL.remaining.duplicate.proteins <- Duke.ESBL.duplicate.proteins %>%
-    filter(!str_detect(.$product,antibiotic.keywords)) %>%
-    filter(!str_detect(.$product,IS.keywords)) %>%
-    filter(!str_detect(.$product,unknown.protein.keywords))
-sum(Duke.ESBL.remaining.duplicate.proteins$count) ## 821 other duplicate proteins in total.
+################################################################################
+## Supplementary Figure S8.
+## Let's analyze duplicated genes in 46 genomes that were sequenced with
+## long-read technology by BARNARDS group in Nature Microbiology (2022).
 
-################################################
-###### Now, let's look at the singleton proteins.
+ BARNARDS.all.proteins <- data.table::fread("../results/BARNARDS-all-proteins.csv",
+                                  drop="sequence")
 
-## 558 singleton ARGs in the genomes.
-Duke.ESBL.singleton.ARGs <- Duke.ESBL.singleton.proteins %>%
+## assert that this is an independent dataset.
+stopifnot(nrow(filter(BARNARDS.all.proteins, Annotation_Accession %in% gbk.annotation$Annotation_Accession)) == 0)
+
+BARNARDS.singleton.proteins <- BARNARDS.all.proteins %>%
+    filter(count == 1)
+
+BARNARDS.duplicate.proteins <- read.csv(
+    "../results/BARNARDS-duplicate-proteins.csv") %>%
+    select(-sequence)
+
+BARNARDS.duplicate.ARGs <- BARNARDS.duplicate.proteins %>%
     filter(str_detect(.$product,antibiotic.keywords))
 
+## 23/46 strains have duplicate ARGs.
+length(unique(BARNARDS.duplicate.ARGs$Annotation_Accession))
+length(unique(BARNARDS.singleton.proteins$Annotation_Accession))
 
-## 3181 singleton MGE protein sequences in the genomes.
-Duke.ESBL.singleton.MGE.proteins <- Duke.ESBL.singleton.proteins %>%
-    filter(str_detect(.$product,IS.keywords))
+## Now make Supplementary Figure S8.
+S8Fig <- make.clinical.genomes.D.ARG.Figure(BARNARDS.duplicate.proteins, BARNARDS.singleton.proteins,
+                                            "Distribution of duplicated genes in 46 genomes\nfrom the BARNARDS study")
+ggsave("../results/S8Fig.pdf", S8Fig, height = 14, width = 8)
 
+################################################################################
+## Supplementary Figure S9.
+## Let's analyze duplicated genes in 149 genomes that were sequenced with
+## long-read technology by  Dantas group in mSystems (2022).
 
-## 6475 unknown singleton protein sequences in the genomes.
-Duke.ESBL.singleton.unknown.proteins <- Duke.ESBL.singleton.proteins %>%
-    ## some hypothetical proteins are "ISXX family insertion sequence hypothetical protein"
-    ## so filter out those cases.
-    filter(!str_detect(.$product,IS.keywords)) %>%
-    filter(str_detect(.$product,unknown.protein.keywords))
+Dantas.all.proteins <- data.table::fread("../results/Mahmud2022-all-proteins.csv",
+                                  drop="sequence")
+## assert that this is an independent dataset.
+stopifnot(nrow(filter(Dantas.all.proteins, Annotation_Accession %in% gbk.annotation$Annotation_Accession)) == 0)
 
-## 47049 remaining cases of singleton proteins in the genomes.
-Duke.ESBL.remaining.singleton.proteins <- Duke.ESBL.singleton.proteins %>%
-    filter(!str_detect(.$product,antibiotic.keywords)) %>%
-    filter(!str_detect(.$product,IS.keywords)) %>%
-    filter(!str_detect(.$product,unknown.protein.keywords))
+Dantas.singleton.proteins <- Dantas.all.proteins %>%
+    filter(count == 1)
 
-#####################################
-## Now make Supplementary Figure S4.
+Dantas.duplicate.proteins <- read.csv(
+    "../results/Mahmud2022-duplicate-proteins.csv") %>%
+    select(-sequence)
 
-S4FigA.data <- Duke.ESBL.duplicate.proteins %>%
-    mutate(Category = sapply(product, categorize.as.MGE.ARG.or.other)) %>%
-    group_by(Annotation_Accession, Category) %>%
-    summarize(Count = sum(count))
+Dantas.duplicate.ARGs <- Dantas.duplicate.proteins %>%
+    filter(str_detect(.$product,antibiotic.keywords))
 
-S4FigB.data <- Duke.ESBL.singleton.proteins %>%
-    mutate(Category = sapply(product, categorize.as.MGE.ARG.or.other)) %>%
-    group_by(Annotation_Accession, Category) %>%
-    summarize(Count = sum(count))
+## 36/149 strains have duplicate ARGs.
+length(unique(Dantas.duplicate.ARGs$Annotation_Accession))
+length(unique(Dantas.singleton.proteins$Annotation_Accession))
 
-S4FigA1 <- ggplot(S4FigA.data, aes(x = Count, y = Annotation_Accession, fill = Category)) +
-    geom_bar(stat="identity") +
+## Now make Supplementary Figure S9.
+S9Fig <- make.clinical.genomes.D.ARG.Figure(Dantas.duplicate.proteins, Dantas.singleton.proteins,
+                                            "Distribution of duplicated genes in 149 genomes\nfrom Barnes-Jewish Hospital (Mahmud et al. 2022)")
+
+ggsave("../results/S9Fig.pdf", S9Fig, height = 18, width = 11)
+
+#######################################################
+## Supplementary Figure S10.
+## Let's analyze duplicated genes in 114 complete genomes that were sequenced with
+## long-read technology by Hawkey et al. in Genome Medicine (2022).
+## I downloaded the RefSeq accessions, since most of the Genbank sequences didn't
+## have any gene annotations.
+Hawkey.all.proteins <- data.table::fread("../results/Hawkey2022-all-proteins.csv",
+                                         drop="sequence")
+
+## assert that this is an independent dataset.
+stopifnot(nrow(filter(Hawkey.all.proteins, Annotation_Accession %in% gbk.annotation$Annotation_Accession)) == 0)
+
+Hawkey.singleton.proteins <- Hawkey.all.proteins %>%
+    filter(count == 1)
+
+Hawkey.duplicate.proteins <- read.csv(
+    "../results/Hawkey2022-duplicate-proteins.csv") %>%
+    select(-sequence)
+
+Hawkey.duplicate.ARGs <- Hawkey.duplicate.proteins %>%
+    filter(str_detect(.$product,antibiotic.keywords))
+sum(Hawkey.duplicate.ARGs$count)
+
+## 20/114 strains have duplicate ARGs.
+length(unique(Hawkey.duplicate.ARGs$Annotation_Accession))
+length(unique(Hawkey.singleton.proteins$Annotation_Accession))
+
+## Now make Supplementary Figure S10.
+S10Fig <- make.clinical.genomes.D.ARG.Figure(Hawkey.duplicate.proteins, Hawkey.singleton.proteins,
+                                             "Distribution of duplicated genes in 114 genomes\nfrom an Australian ICU (Hawkey et al. 2022)")
+ggsave("../results/S10Fig.pdf", S10Fig, height = 14, width = 11)
+
+################################################################################
+## Now do the analysis of enrichment across all these clinical datasets.
+
+## 6/12 strains have duplicate ARGs.
+## 23/46 strains have duplicate ARGs.
+## 36/149 strains have duplicate ARGs.
+## 20/114 strains have duplicate ARGs.
+
+## clinical resistance genomes are even more enriched with ARGs than the baseline dataset.
+## the null comes from Table S1 row for humans.
+## IMPORTANT TODO: UPDATE THE NULL GIVEN THE NEW DATA PROCESSING!!!
+binom.test(x=(6+23+36+20),n=(12+46+149+114),p=0.1407)
+
+################################################################################
+## Supplementary Figure 11. Analysis of copy number in the genomes from Hawkey et al. (2022).
+##    The Hawkey et al. 2022 paper specifically focuses on ESBL resistance,
+##    so let's focus on beta-lactamases, and can compare to other kinds of resistances in these data.
+
+ARG.copy.number.data <- read.csv("../results/Hawkey2022_ARG_copy_numbers.csv") %>%
+    mutate(beta.lactam.resistance = ifelse(str_detect(product,beta.lactam.keywords), TRUE, FALSE))
+
+beta.lactam.ARGs <- filter(ARG.copy.number.data, beta.lactam.resistance==TRUE)
+non.beta.lactam.ARGs <- filter(ARG.copy.number.data, beta.lactam.resistance==FALSE)
+
+chromosome.plasmid.copy.number.data <- read.csv("../results/Hawkey2022_chromosome_plasmid_copy_numbers.csv") %>%
+    mutate(has.ARG = ifelse(SeqID %in% ARG.copy.number.data$SeqID, TRUE, FALSE)) %>%
+    mutate(has.beta.lactamase = ifelse(SeqID %in% beta.lactam.ARGs$SeqID, TRUE, FALSE)) %>%
+    ## 0 == no ARG, 1 == has ARG, 2 == has beta-lactamase.
+    mutate(ARG.classification = has.ARG + has.beta.lactamase) %>%
+    mutate(ARG.classification = as.factor(ARG.classification)) %>%
+    mutate(`Plasmid class` = recode(ARG.classification, `0` = "No ARGs",
+                                    `1` = "Non-beta-lactamase ARGs",
+                                    `2` = "Beta-lactamases")) %>%
+    ## remove outlier points with very low coverage.
+    filter(CopyNumber > 0.5)
+
+## beta-lactamases have higher copy number compared to other ARGs in these strains.
+wilcox.test(beta.lactam.ARGs$CopyNumber, non.beta.lactam.ARGs$CopyNumber)$p.value
+
+## Plasmids with ARGs actually have lower copy numbers than
+## plasmids without ARGs.
+plasmid.copy.number.data <- chromosome.plasmid.copy.number.data %>%
+    filter(SeqType == "plasmid") %>%
+    arrange(CopyNumber)
+
+ARG.plasmid.data <- plasmid.copy.number.data %>%
+    filter(has.ARG==TRUE)
+
+no.ARG.plasmid.data <- plasmid.copy.number.data %>%
+    filter(has.ARG == FALSE)
+
+wilcox.test(ARG.plasmid.data$CopyNumber, no.ARG.plasmid.data$CopyNumber)$p.value
+
+## Supplementary Figure S11.
+plasmid.copy.number.plot <- ggplot(plasmid.copy.number.data,
+                                   aes(x=log10(CopyNumber),
+                                       fill=`Plasmid class`)) +
+    geom_histogram(bins=50) +
     theme_classic() +
-    theme(legend.position="bottom") +
-    ylab("") ## remove the redundant "Annotation" label on the y-axis.
+    xlab("log10(Plasmid copy number)")  +
+    theme(legend.position="top")
 
-S4Figlegend <- get_legend(S4FigA1)
-S4FigA1 <- S4FigA1 + guides(fill = "none")
-
-S4FigA2 <- ggplot(S4FigA.data, aes(x = Count, y = Annotation_Accession, fill = Category)) +
-    geom_bar(stat="identity", position = "fill") +
-    theme_classic() +
-    ## remove genome name labels.
-    theme(axis.text.y=element_blank()) +
-    guides(fill = "none") +
-    xlab("Frequency") +
-    ylab("") ## remove the redundant "Annotation" label on the y-axis.
-
-S4FigA.title <- ggdraw() + draw_label("Distribution of duplicated genes in 12 ESBL-resistant isolates", fontface='bold')
-
-S4FigA <- plot_grid(S4FigA.title,
-                   plot_grid(S4FigA1, S4FigA2, labels = c("A",""),
-                             nrow=1, rel_widths=c(2,1)),
-                   nrow=2, rel_heights=c(0.2,2))
-
-
-S4FigB1 <- ggplot(S4FigB.data, aes(x = Count, y = Annotation_Accession, fill = Category)) +
-    geom_bar(stat="identity") +
-    theme_classic() +
-    guides(fill = "none") +
-    ylab("") ## remove the redundant "Annotation" label on the y-axis.
-
-S4FigB2 <- ggplot(S4FigB.data, aes(x = Count, y = Annotation_Accession, fill = Category)) +
-    geom_bar(stat="identity", position = "fill") +
-    theme_classic() +
-    ## remove genome name labels.
-    theme(axis.text.y=element_blank()) +
-    guides(fill = "none") +
-    xlab("Frequency") +
-    ylab("") ## remove the redundant "Annotation" label on the y-axis.
-
-
-S4FigB.title <- ggdraw() + draw_label("Distribution of single-copy genes in 12 ESBL-resistant isolates", fontface='bold')
-
-S4FigB <- plot_grid(S4FigB.title,
-                   plot_grid(S4FigB1, S4FigB2, labels = c("B",""),
-                             nrow=1, rel_widths=c(2,1)),
-                   nrow=2, rel_heights=c(0.2,2))
-
-## now make the full Supplementary Figure S4.
-S4Fig <- plot_grid(S4FigA, S4FigB, S4Figlegend, ncol = 1, rel_heights = c(2,2,0.25))
-ggsave("../results/S4Fig.pdf", S4Fig, height = 7, width = 10)
+ggsave("../results/S11Fig-Hawkey2022-plasmid-copy-number.pdf",
+       plasmid.copy.number.plot,height=5.75,width=5.75)
 
 ################################################################################
 ## Analysis of chains of duplications, produced by join-duplications.py.
@@ -1562,7 +2025,7 @@ ggsave("../results/S4Fig.pdf", S4Fig, height = 7, width = 10)
 ## and re-calculate statistics for duplicated ARGs associated with MGEs,
 ## and duplicated ARGs that are not associated with MGEs.
 
-joined.duplications <- read.csv("../results/joined-duplicate-proteins.csv") %>%
+all.joined.duplications <- read.csv("../results/joined-duplicate-proteins.csv") %>%
     tibble() %>%
     ## for numeric consistency, remove all duplications with NA product annotations.
     filter(!is.na(product))
@@ -1570,46 +2033,49 @@ joined.duplications <- read.csv("../results/joined-duplicate-proteins.csv") %>%
 
 make.ARG.MGE.region.contingency.table <- function(joined.duplications,
                                                   antibiotic.keywords,
-                                                  IS.keywords) {
+                                                  MGE.keywords) {
 
     ARG.joined.duplications <- joined.duplications %>%
         filter(str_detect(.$product,antibiotic.keywords))
 
     MGE.joined.duplications <- joined.duplications %>%
-        filter(str_detect(.$product, IS.keywords))
+        filter(str_detect(.$product, MGE.keywords))
         
     ## get the regions-- drop the sequence information.
     ## There are 756,165 regions in total.
     joined.regions <- joined.duplications %>%
-        select(Annotation_Accession, Replicon_Accession, Replicon_type, region_index) %>%
+        select(Annotation_Accession, Replicon_Accession, Replicon_type,
+               region_index, region_length, num_proteins_in_region, region_start, region_end) %>%
         distinct()
     
     ARG.joined.regions <- ARG.joined.duplications %>%
-        select(Annotation_Accession, Replicon_Accession, Replicon_type, region_index) %>%
+        select(Annotation_Accession, Replicon_Accession, Replicon_type,
+               region_index, region_length, num_proteins_in_region, region_start, region_end) %>%
         distinct()
     
     no.ARG.joined.regions <- anti_join(joined.regions, ARG.joined.regions)
     
     MGE.joined.regions <- MGE.joined.duplications %>%
-        select(Annotation_Accession, Replicon_Accession, Replicon_type, region_index) %>%
+        select(Annotation_Accession, Replicon_Accession, Replicon_type,
+               region_index, region_length, num_proteins_in_region, region_start, region_end) %>%
         distinct()
     
     no.MGE.joined.regions <- anti_join(joined.regions, MGE.joined.regions)
     
     ## count regions (groups) that contain both ARGs and MGE genes.
-    ## 3166 regions contain both ARGs and MGE genes.
+    ## 2777 regions contain both ARGs and MGE genes.
     ARG.and.MGE.joined.regions <- inner_join(ARG.joined.regions, MGE.joined.regions)
     
     ## count regions (groups) that contain ARGs but no MGE genes.
-    ## 2710 regions contain ARGs but no MGE genes.
+    ## 2375 regions contain ARGs but no MGE genes.
     ARG.and.no.MGE.joined.regions <- inner_join(ARG.joined.regions, no.MGE.joined.regions)
     
     ## count regions (groups) that contain MGE genes but no ARGs.
-    ## 572375 regions contain MGE genes but no ARGs.
+    ## 508073 regions contain MGE genes but no ARGs.
     MGE.and.no.ARG.joined.regions <- inner_join(no.ARG.joined.regions, MGE.joined.regions)
     
     ## count regions (groups) that have neither MGE genes nor ARGs.
-    ## 177363 regions contain neither MGE genes nor ARGs.
+    ## 156292 regions contain neither MGE genes nor ARGs.
     no.MGE.and.no.ARG.joined.regions <- inner_join(no.ARG.joined.regions,no.MGE.joined.regions)
     
     ## now use a contingency table to test whether duplicated ARGs and duplicated MGEs
@@ -1624,5 +2090,225 @@ make.ARG.MGE.region.contingency.table <- function(joined.duplications,
     return(joined.regions.contingency.table)
 }
 
-joined.regions.contingency.table <- make.ARG.MGE.region.contingency.table(joined.duplications, antibiotic.keywords, IS.keywords)
+joined.regions.contingency.table <- make.ARG.MGE.region.contingency.table(all.joined.duplications, antibiotic.keywords, MGE.keywords)
+
+fisher.test(joined.regions.contingency.table)
+
+#######################################################################################
+## What is the relative contribution of segmental duplications to transpositions for duplicated ARGs in this dataset?
+## This analysis shows that segmental duplications play a relatively small role compared to MGEs.
+
+## get all regions containing duplicated ARGs (5152 of these).
+joined.regions.containing.ARGs <- all.joined.duplications %>%
+    filter(str_detect(.$product,antibiotic.keywords)) %>%
+    select(Annotation_Accession, Replicon_Accession, Replicon_type,
+           region_index, region_length, num_proteins_in_region, region_start, region_end) %>%
+    distinct() %>%
+    ## index these distinct regions containing duplicated ARGs
+    mutate(dupARG_region_index = row_number())
+
+## get all associated information, including sequences.
+joined.duplications.containing.ARGs <- joined.regions.containing.ARGs %>%
+    ## join in this way to keep the dupARG_region_index column.
+    left_join(all.joined.duplications)
+## write to file.
+write.csv(x=joined.duplications.containing.ARGs,
+          file="../results/joined-duplications-containing-ARGs.csv")
+
+## from looking at this spreadsheet, several segmental duplications contain several ARGs as well as transposases etc.
+## so counting statistics per ARG may not be the best unit for counting independent units.
+
+## let's count the number of these joined duplications containing ARGs that represent segmental duplications,
+## and let's get the repeat number of these segmental duplications too.
+
+count.duplicates.within.region <- function(region.df) {
+    region.df %>%
+        group_by(
+            ## general region metadata
+            Annotation_Accession, Replicon_Accession, Replicon_type,
+            region_index, region_length, num_proteins_in_region, region_start, region_end,
+            ## keep the dupARG_region_index column to keep track of what region each ARG is in.
+            dupARG_region_index,
+            ## actual sequence data
+            protein_length, product, sequence) %>%
+        summarize(dup.count = n()) %>%
+        ungroup()
+}
+
+
+dup.ARG.regions.with.segmental.dup.data <- joined.duplications.containing.ARGs %>%
+    split(.$dupARG_region_index) %>%
+    map_dfr(count.duplicates.within.region)
+
+## just look at ARGs within these regions with segmental dup data.
+dup.ARGs.within.regions.with.segmental.dup.data <- dup.ARG.regions.with.segmental.dup.data %>%
+    filter(str_detect(.$product,antibiotic.keywords)) %>%
+    select(Annotation_Accession, Replicon_Accession, Replicon_type,
+           region_length, num_proteins_in_region, protein_length, product, sequence, dup.count, dupARG_region_index) %>%
+    distinct()
+## write to file.
+write.csv(x=dup.ARGs.within.regions.with.segmental.dup.data,
+          file="../results/joined-regions-just-ARGs-and-dup-counts.csv")
+
+## 282 ARGs have multiple copies in the same region of duplicated genes.
+segmental.ARG.duplications <- dup.ARGs.within.regions.with.segmental.dup.data %>%
+    filter(dup.count > 1)
+## These 282 ARGs are found in 196 unique regions of duplicated genes.
+length(unique(segmental.ARG.duplications$dupARG_region_index))
+## so 196 out of the 5,152 joined regions containing duplicated ARGs have multiple copies of some ARG.
+
+
+#################################################
+## What MGE functions are associated with duplicated ARGs?
+## To answer this question, let's look at MGE functions that are jointly duplicated in the same region as
+## duplicated ARGs.
+
+## 7,822 genes with MGE-associated functions here.
+MGEs.in.joined.duplications.containing.ARGs <- joined.duplications.containing.ARGs %>%
+    filter(str_detect(.$product,MGE.keywords))
+## write to file.
+write.csv(x=MGEs.in.joined.duplications.containing.ARGs,
+          file="../results/joined-regions-MGE-functions-associated-with-dupARGs.csv")
+
+## 4,756 transposase sequences here (out of the 7,822).
+transposase.in.joined.duplications.containing.ARGs <- joined.duplications.containing.ARGs %>%
+    filter(str_detect(.$product,"transposase"))
+
+## 680 integrases here (out of the 7,822).
+integrase.in.joined.duplications.containing.ARGs <- joined.duplications.containing.ARGs %>%
+    filter(str_detect(.$product,"integrase"))
+
+################################################################################
+## Examine the frequency of transposase sequences that are found with ARGs, and
+## host range of these transposases.
+
+annotated.ARG.associated.transposases <- transposase.in.joined.duplications.containing.ARGs %>%
+    left_join(gbk.annotation) %>%
+    ## Annotate the genera.
+    mutate(Genus = stringr::word(Organism, 1))
+
+## write relevant columns  to file, so that I can cluster these transposons,
+## allowing k-mismatches from most common sequence within a cluster, using Julia.
+annotated.ARG.associated.transposases %>%
+    select(product, Genus, sequence) %>%
+    rename(product_annotation = product) %>%
+write.csv(file="../results/transposases-in-dup-regions-with-ARGs.csv", quote=FALSE,row.names=FALSE)
+
+## also make a file to cluster E. coli transposases.
+Ecoli.ARG.associated.transposases <- annotated.ARG.associated.transposases %>%
+    filter(str_detect(.$Organism, "Escherichia coli")) %>%
+    group_by(product, sequence) %>%
+    summarize(count = n()) %>%
+    arrange(desc(count))
+## and write it to file.
+write.csv(x=Ecoli.ARG.associated.transposases,
+          file="../results/Ecoli-transposases-in-dup-regions-with-ARGs.csv")
+
+####################################################################
+## now cluster the transposases using the Julia script cluster-transposases.jl.
+print("Running: julia cluster-transposases.jl")
+system("julia cluster-transposases.jl")
+print("Completed: julia cluster-transposases.jl.")
+####################################################################
+
+## now read in the clustered transposons made by cluster-transposases.jl.
+clustered.ARG.associated.transposases <- read.csv(
+    "../results/merged_transposases-in-dup-regions-with-ARGs.csv") %>%
+    ## remove "NA" Genera
+    filter(!is.na(Genus))
+
+## now let's examine the clustered sequences in order to make a rank order list
+## and see the distribution across genus for each sequence.
+
+##make a rank column by total count of the sequence across Genus.
+clustered.ARG.associated.transposase.ranks <- clustered.ARG.associated.transposases %>%
+    group_by(sequence) %>% summarize(total.count = sum(count)) %>%
+    arrange(desc(total.count)) %>%
+    mutate(rank = row_number()) %>%
+    ungroup()
+
+clustered.ARG.associated.transposases.with.ranks <- clustered.ARG.associated.transposases %>%
+    full_join(clustered.ARG.associated.transposase.ranks) %>%
+    arrange(rank, desc(count))
+
+full.plot.of.clustered.ARG.associated.transposases <- clustered.ARG.associated.transposases.with.ranks %>%
+    ggplot(aes(x=rank, fill=Genus, y=count)) +
+    geom_bar(position="stack", stat="identity") +
+    theme_classic() +
+    theme(legend.position="bottom")
+
+ggsave("../results/S14Fig.pdf",
+       full.plot.of.clustered.ARG.associated.transposases,
+       width=8, height=7)
+
+## filter on just the top ranks.
+top.clustered.ARG.associated.transposases <- clustered.ARG.associated.transposases.with.ranks %>%
+    filter(rank <= 10)
+## write this out, so that I can make a table of these transposase classes by hand.
+write.csv(x=top.clustered.ARG.associated.transposases, file="../results/top-clustered-ARG-associated-transposases.csv")
+
+## by hand, I made a table of rank to IS Class for these top 10 transposase classes,
+## by using blastp searches of the top sequence in the cluster against the ISFinder database:
+## https://www-is.biotoul.fr/blast.php.
+## IMPORTANT: If this script is run on the newest NCBI RefSeq genomes, then the transposases in
+## ../results/top-clustered-ARG-associated-transposases.csv need to be manually cross-checked
+## against ISFinder to ensure that these annotations are correct and self-consistent!
+top.transposase.annotations <- read.csv("../data/Top10-ARG-associated-transposase-annotations.csv")
+## now add these data as a column.
+annotated.top.clustered.ARG.associated.transposases <- full_join(
+    top.clustered.ARG.associated.transposases,
+    top.transposase.annotations) %>%
+    ## order the labels according to their rank.
+    mutate(Transposase = factor(Transposase,levels=unique(Transposase), ordered=TRUE))
+    
+
+plot.of.top.clustered.ARG.associated.transposases <- annotated.top.clustered.ARG.associated.transposases %>%
+    ggplot(aes(x=Transposase, fill=Genus, y=count)) +
+    geom_bar(position="stack", stat="identity") +
+    theme_classic()  +
+    theme(legend.position="bottom", legend.title=element_blank(),
+          legend.text = element_text(size = 8)) +
+    theme(axis.text.x  = element_text(angle=45,vjust=0.5))
+
+## This will be Figure 5E.
+ggsave("../results/top-clustered-ARG-transposons.pdf",
+       plot.of.top.clustered.ARG.associated.transposases, height = 5, width=6)
+
+# let's examine just the unique sequences in order to make a rank order list
+## and see the distribution across genus for each sequence.
+
+ARG.associated.transposase.sequences <-  annotated.ARG.associated.transposases %>%
+    group_by(Genus, sequence) %>% summarize(count.per.genus = n()) %>% arrange(desc(count.per.genus)) %>%
+    ## remove rows with missing Genus.
+    filter(!is.na(Genus))
+
+##make a rank column by total count of the sequence across Genus.
+ARG.associated.transposase.ranks <- annotated.ARG.associated.transposases %>%
+    group_by(sequence) %>% summarize(total.count = n()) %>%
+    arrange(desc(total.count)) %>%
+    mutate(rank = row_number()) %>%
+    ungroup()
+## and join back to get the Genus information.
+ARG.associated.transposase.sequences.with.ranks <- ARG.associated.transposase.sequences %>%
+    full_join(ARG.associated.transposase.ranks)
+
+ARG.associated.transposase.rank.plot1 <- ARG.associated.transposase.sequences.with.ranks %>%
+    ggplot(aes(x=rank, fill=Genus, y=count.per.genus)) +
+    geom_bar(position="stack", stat="identity") +
+    theme_classic()
+
+ARG.associated.transposase.rank.plot1
+ggsave("../results/ARG-transposon-rank-plot1.pdf",ARG.associated.transposase.rank.plot1)
+
+## filter on just the top ranks.
+top.ARG.associated.transposase.sequences.with.ranks <- ARG.associated.transposase.sequences.with.ranks %>%
+    filter(rank < 10)
+
+ARG.associated.transposase.rank.plot2 <- top.ARG.associated.transposase.sequences.with.ranks %>%
+    ggplot(aes(x=rank, fill=Genus, y=count.per.genus)) +
+    geom_bar(position="stack", stat="identity") +
+    theme_classic()
+
+ARG.associated.transposase.rank.plot2
+ggsave("../results/ARG-transposon-rank-plot2.pdf",ARG.associated.transposase.rank.plot2)
 

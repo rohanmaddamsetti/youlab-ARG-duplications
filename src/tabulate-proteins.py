@@ -12,7 +12,6 @@ Usage: python tabulate-proteins.py --ignore-singletons ## for tabulating multi-c
 '''
 
 import os
-import gzip
 from Bio import SeqIO
 from tqdm import tqdm
 import argparse
@@ -47,18 +46,21 @@ with open(chromosome_plasmid_tbl, 'r') as chromosome_plasmid_fh:
         else:
             replicon_type_lookup_table[my_annot_accession] = {rep_id : rep_type}
 
+## make a unique sequence ID for each tabulated sequence.
+## This is incremented in the innermost loop.
+seq_id = 1
 with open(outf, 'w') as outfh:
-    header = "Annotation_Accession,count,chromosome_count,plasmid_count,unassembled_count,product,sequence\n"
+    header = "SeqID,Annotation_Accession,count,chromosome_count,plasmid_count,unassembled_count,product,sequence\n"
     outfh.write(header)
-    for gbk_gz in tqdm(os.listdir("../results/gbk-annotation")):
-        if not gbk_gz.endswith(".gbff.gz"): continue
-        annotation_accession = gbk_gz.split("_genomic.gbff.gz")[0]
+    for gbk in tqdm(os.listdir("../results/gbk-annotation")):
+        if not gbk.endswith(".gbff"): continue
+        annotation_accession = gbk.split("_genomic.gbff")[0]
         ## IMPORTANT TODO: make sure chromosome-plasmid-table.csv
         ## and the data in ../results/gbk-annotation are consistent.
         ## The next line is a temporary consistency check.
         if annotation_accession not in replicon_type_lookup_table: continue
-        infile = "../results/gbk-annotation/" + gbk_gz
-        with gzip.open(infile, "rt") as genome_fh:
+        infile = os.path.join("../results/gbk-annotation/", gbk)
+        with open(infile, "rt") as genome_fh:
             protein_dict = {}
             for replicon in SeqIO.parse(genome_fh, "gb"):
                 replicon_id = replicon.id
@@ -75,18 +77,19 @@ with open(outf, 'w') as outfh:
                         prot_seq = feat.qualifiers['translation'][0]
                     except:
                         continue
-                    prot_id = feat.qualifiers['protein_id'][0]
                     try: ## replace all commas with semicolons! otherwise csv format is messed up.
                         prot_product = feat.qualifiers['product'][0].replace(',',';')
                     except:
                         prot_product = "NA"
                     if prot_seq not in protein_dict:
-                        protein_dict[prot_seq] = { "count":0,
+                        protein_dict[prot_seq] = { "SeqID":str(seq_id),
+                                                   "count":0,
                                                    "chromosome_count":0,
                                                    "plasmid_count":0,
                                                    "unassembled_count":0,
                                                    "product":prot_product,
                                                    "locations":[]}
+                        seq_id += 1 ## and increment the seq_id for the next new sequence added to the dict.
                     ## check to see that the location has not been seen before.
                     prot_location = str(feat.location)
                     if prot_location in protein_dict[prot_seq]["locations"]:
@@ -106,6 +109,6 @@ with open(outf, 'w') as outfh:
             else:
                 filtered_prot_dict = protein_dict
             for seq, v in filtered_prot_dict.items():
-                row = ','.join([annotation_accession,str(v["count"]), str(v["chromosome_count"]), str(v["plasmid_count"]), str(v["unassembled_count"]), v["product"], seq])
+                row = ','.join([v["SeqID"], annotation_accession, str(v["count"]), str(v["chromosome_count"]), str(v["plasmid_count"]), str(v["unassembled_count"]), v["product"], seq])
                 row = row + '\n'
                 outfh.write(row)
