@@ -26,8 +26,8 @@ download prokaryotes.txt into ../data/GENOME_REPORTS:
 wget https://ftp.ncbi.nlm.nih.gov/genomes/GENOME_REPORTS/prokaryotes.txt
 
 For replicating the results in the paper, skip this step, and just use the
-prokaryotes.txt provided in the data/ folder. This one is dated March 21 2021
-and was used for the paper.
+prokaryotes.txt.zip provided in the data/ folder. This one is dated June 12 2023
+and was used for the paper. You will have to unzip this file before doing the analysis.  
 
 ### See the directions in src/README.md for how to run the bioinformatics pipeline and analysis.
 
