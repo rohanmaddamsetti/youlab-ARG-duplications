@@ -46,7 +46,7 @@ quite quickly, so no need to submit them to a partition on DCC--
 just run them in an interactive session on DCC.
 
 python make-chromosome-plasmid-table.py  
-python make-gbk-annotation-table.py ## this runs for ~35 min on DCC.  
+python make-gbk-annotation-table.py ## this runs for ~35 min on DCC.
 
 ## double-check assembly quality on DCC.  
 python run-QC-and-make-assembly-stats-table.py  
